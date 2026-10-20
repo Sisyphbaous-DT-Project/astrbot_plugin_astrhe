@@ -119,14 +119,24 @@ def validate_alarm_time(
     return first
 
 
+def _join(first: str, second: str) -> str:
+    return f"{first}；{second}" if first else second
+
+
 async def validate_alarm(
     payload: dict,
     qq: Any,
     tz: Any,
     *,
     allow_repeat: bool = True,
+    access: Any = None,
+    allow_unlisted: bool = False,
 ) -> tuple[dict, str]:
-    """验证会话、平台、卡片和时间。私聊非好友只给提醒，不阻止创建。"""
+    """验证会话、平台、卡片和时间。私聊非好友只给提醒，不阻止创建。
+
+    access 给出时检查会话名单：名单外的目标拒绝；allow_unlisted（管理员亲口要求）
+    时照办，只在提醒里说明。
+    """
     pid = qq.platform.default_platform_id()
     if not pid:
         raise ValueError("当前没有可用的 aiocqhttp 平台")
@@ -134,18 +144,29 @@ async def validate_alarm(
     result["target_umo"] = resolve_session_ref(payload.get("target_umo", ""), pid)
     _, kind, sid = parse_umo(result["target_umo"])
     warning = ""
+    if access is not None and not await access.allows(result["target_umo"]):
+        if not allow_unlisted:
+            raise ValueError(
+                f"会话 {result['target_umo']} 不在 AstrHe 的会话名单里"
+                "（插件白名单、黑名单或 AstrBot 访问控制），不能给它定闹钟"
+            )
+        warning = "这个会话不在 AstrHe 的会话名单里，按管理员的要求照办"
     if kind == "GroupMessage":
         groups = await qq.group_ids()
         if groups is None:
-            warning = "平台暂时不可用，无法确认是否在目标群；已保留闹钟安排"
+            warning = _join(
+                warning, "平台暂时不可用，无法确认是否在目标群；已保留闹钟安排"
+            )
         elif sid not in groups:
             raise ValueError(f"我不在群 {sid} 里")
     else:
         friends = await qq.friend_ids()
         if friends is None:
-            warning = "平台暂时不可用，无法确认好友关系；消息可能被 QQ 拦截"
+            warning = _join(
+                warning, "平台暂时不可用，无法确认好友关系；消息可能被 QQ 拦截"
+            )
         elif sid not in friends:
-            warning = "对方不是好友，消息可能被 QQ 拦截"
+            warning = _join(warning, "对方不是好友，消息可能被 QQ 拦截")
     card = result.get("card") or {}
     for key in ("background", "purpose", "how"):
         if not str(card.get(key, "")).strip():

@@ -38,6 +38,7 @@ class ScheduleToolImpl:
         secrecy_resolver: Any,
         admins_getter,
         friend_request_manager=None,
+        access=None,
     ):
         self.storage = storage
         self.context = context
@@ -47,6 +48,7 @@ class ScheduleToolImpl:
         self.secrecy_resolver = secrecy_resolver
         self._admins_getter = admins_getter
         self.friend_requests = friend_request_manager
+        self.access = access
 
     # ---------------- 入口 ----------------
 
@@ -169,6 +171,9 @@ class ScheduleToolImpl:
                 self.qq,
                 tz,
                 allow_repeat=is_admin,
+                # 管理员亲口要求给名单外的会话定闹钟时照办，只提醒一句
+                access=self.access,
+                allow_unlisted=is_admin,
             )
         except Exception as exc:
             return f"闹钟未创建：{exc}"

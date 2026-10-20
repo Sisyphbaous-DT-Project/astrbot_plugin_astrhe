@@ -72,10 +72,18 @@ def _squash(text: str) -> str:
 class Recorder:
     """聊天账本记录器。"""
 
-    def __init__(self, storage: Storage, logger: Any, enabled_getter):
+    def __init__(self, storage: Storage, logger: Any, enabled_getter, access=None):
         self.storage = storage
         self.logger = logger
         self._enabled_getter = enabled_getter
+        self.access = access
+
+    def _allowed(self, umo: str) -> bool:
+        """会话名单外的不记（AstrBot 白名单会放行管理员在名单外群里说的话，这里也拦下）。
+
+        到达的消息已经过 AstrBot 会话管理的过滤，只需再看名单。
+        """
+        return self.access is None or self.access.list_allows(umo)
 
     def _enabled(self) -> bool:
         try:
@@ -142,8 +150,14 @@ class Recorder:
                 obj.type.value if hasattr(obj.type, "value") else str(obj.type)
             )
             session_id = normalize_session_id(message_type, str(obj.session_id))
+            umo = build_umo(event.get_platform_id(), message_type, session_id)
+            # 发送完成钩子不受 AstrBot「对会话停用插件」的过滤，要做完整判断
+            if self.access is not None and not await self.access.allows(
+                getattr(event, "unified_msg_origin", "") or umo
+            ):
+                return
             await self.storage.ledger.add_message(
-                umo=build_umo(event.get_platform_id(), message_type, session_id),
+                umo=umo,
                 platform_id=event.get_platform_id(),
                 message_type=message_type,
                 session_id=session_id,
@@ -165,11 +179,14 @@ class Recorder:
         obj = event.message_obj
         message_type = obj.type.value if hasattr(obj.type, "value") else str(obj.type)
         session_id = normalize_session_id(message_type, str(obj.session_id))
+        umo = build_umo(event.get_platform_id(), message_type, session_id)
+        if not self._allowed(umo):
+            return
         text = components_to_text(obj.message)
         sender = obj.sender
         platform_message_id = str(obj.message_id) if obj.message_id else None
         await self.storage.ledger.add_message(
-            umo=build_umo(event.get_platform_id(), message_type, session_id),
+            umo=umo,
             platform_id=event.get_platform_id(),
             message_type=message_type,
             session_id=session_id,
@@ -193,6 +210,16 @@ class Recorder:
         user_id = str(raw.get("user_id", "") or "")
         target_id = str(raw.get("target_id", "") or "")
         message_id = str(raw.get("message_id", "") or "")
+        if group_id:
+            umo = build_umo(event.get_platform_id(), "GroupMessage", group_id)
+        else:
+            umo = build_umo(
+                event.get_platform_id(),
+                "FriendMessage",
+                user_id or str(event.get_sender_id()),
+            )
+        if not self._allowed(umo):
+            return
 
         if kind == "recall":
             # 撤回：把对应消息标记为已撤回，并从夜间素材中排除
@@ -205,14 +232,6 @@ class Recorder:
                 else:
                     await self.storage.ledger.mark_recalled_any(message_id)
 
-        if group_id:
-            umo = build_umo(event.get_platform_id(), "GroupMessage", group_id)
-        else:
-            umo = build_umo(
-                event.get_platform_id(),
-                "FriendMessage",
-                user_id or str(event.get_sender_id()),
-            )
         # detail 只留少量字段，避免把大对象塞进账本
         detail = {
             k: raw.get(k)

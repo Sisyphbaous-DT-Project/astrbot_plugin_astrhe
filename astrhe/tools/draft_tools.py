@@ -37,6 +37,7 @@ class DraftTools:
         tz_getter=None,
         commit_state=None,
         admins=(),
+        access=None,
     ):
         self.storage = storage
         self.run_id = run_id
@@ -47,6 +48,7 @@ class DraftTools:
         self._tz_getter = tz_getter
         self.commit_state = commit_state if commit_state is not None else {}
         self.admins = admins
+        self.access = access
 
     def guard(self, fn, name):
         async def guarded(event, **kw):
@@ -238,7 +240,9 @@ class DraftTools:
         }
         if self.qq is None or self._tz_getter is None:
             return "闹钟草稿校验不可用：缺少平台或时区"
-        payload, warning = await validate_alarm(payload, self.qq, self._tz_getter())
+        payload, warning = await validate_alarm(
+            payload, self.qq, self._tz_getter(), access=self.access
+        )
         drafts = await self.storage.runs.get_drafts(self.run_id)
         active = [
             json.loads(d["payload_json"])

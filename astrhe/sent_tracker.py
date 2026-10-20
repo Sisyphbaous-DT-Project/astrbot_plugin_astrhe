@@ -90,6 +90,7 @@ class SentTracker:
         tz_getter,
         logger: Any,
         enabled_getter,
+        access: Any = None,
     ):
         self.storage = storage
         self.context = context
@@ -97,6 +98,7 @@ class SentTracker:
         self._tz_getter = tz_getter
         self.logger = logger
         self._enabled_getter = enabled_getter
+        self.access = access
         self._tasks: set[asyncio.Task] = set()
 
     def _enabled(self) -> bool:
@@ -120,6 +122,9 @@ class SentTracker:
             args = tool_args if isinstance(tool_args, dict) else {}
             text = messages_to_text(args.get("messages"))
             if not target or not text:
+                return
+            # 发到会话名单外的不补账本、不补对话历史
+            if self.access is not None and not await self.access.allows(target):
                 return
             ts = utc_now()
             await self._record_ledger(event, target, text, ts)

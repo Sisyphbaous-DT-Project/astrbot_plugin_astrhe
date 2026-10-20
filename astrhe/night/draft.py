@@ -38,6 +38,7 @@ class DraftCommitter:
         rate_limiter: Any = None,
         qq_client: Any = None,
         admins=None,
+        access: Any = None,
     ):
         self.storage = storage
         self.context = context
@@ -46,6 +47,7 @@ class DraftCommitter:
         self.tz = tz
         self.rate_limiter = rate_limiter
         self.qq = qq_client
+        self.access = access
         self.admins = (
             admins if admins is not None else context.get_config().get("admins_id", [])
         )
@@ -324,7 +326,9 @@ class DraftCommitter:
         run_at_str = payload.get("run_at", "")
         cron_expression = payload.get("cron_expression", "")
         try:
-            checked, warning = await validate_alarm(payload, self.qq, self.tz)
+            checked, warning = await validate_alarm(
+                payload, self.qq, self.tz, access=self.access
+            )
             target_umo = checked["target_umo"]
             await validate_night_alarm_frequency(
                 self.storage, checked, self.tz, self.run_id

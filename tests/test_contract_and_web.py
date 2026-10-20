@@ -17,17 +17,23 @@ from tests.conftest import FakeContext, FakeEvent, FakeLogger, Plain, arun, make
 def test_version_and_only_approved_settings():
     root = Path(__file__).resolve().parents[1]
     metadata = yaml.safe_load((root / "metadata.yaml").read_text())
-    assert str(metadata["version"]) == "0.3.1" and "astrbot_version" not in metadata
+    assert str(metadata["version"]) == "0.4.0" and "astrbot_version" not in metadata
     settings = json.loads((root / "_conf_schema.json").read_text())
     assert set(settings) == {
         "enabled",
         "provider_id",
         "persona_id",
+        "session_whitelist",
+        "session_blacklist",
         "frontend_landscape",
         "frontend_portrait",
     }
     assert settings["persona_id"]["_special"] == "select_persona"
     assert settings["persona_id"]["default"] == ""
+    for key in ("session_whitelist", "session_blacklist"):
+        assert settings[key]["type"] == "list"
+        assert settings[key]["items"] == {"type": "string"}
+        assert settings[key]["default"] == []
     for key, default in (
         ("frontend_landscape", "SOUL OS"),
         ("frontend_portrait", "NORMAL"),

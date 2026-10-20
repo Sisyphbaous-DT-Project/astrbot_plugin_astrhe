@@ -7,6 +7,8 @@
 3. 本会话的规划段落
 4. 本会话可见的待办（今天的、逾期的、已到 show_from 的未来待办）
 5. day_reminders 自我提醒（只给白天人格和夜间人格相同的会话）
+
+会话名单外的会话什么都不注入，也不替换 future_task。
 """
 
 from __future__ import annotations
@@ -25,6 +27,10 @@ except Exception:  # pragma: no cover
     TextPart = None  # type: ignore[assignment]
 
 
+#: 会话名单外收起的 AstrHe 白天工具（QQ 小工具照常可用）
+UNLISTED_HIDDEN_TOOLS = ("astrhe_schedule", "astrhe_todo_update", "astrhe_read_plan")
+
+
 class Injector:
     def __init__(
         self,
@@ -36,6 +42,7 @@ class Injector:
         *,
         context: Any = None,
         persona_id_getter=None,
+        access: Any = None,
     ):
         self.storage = storage
         self._tz_getter = tz_getter
@@ -44,6 +51,7 @@ class Injector:
         self.logger = logger
         self.context = context
         self._persona_id_getter = persona_id_getter
+        self.access = access
 
     def _enabled(self) -> bool:
         try:
@@ -55,6 +63,15 @@ class Injector:
         if not self._enabled():
             return
         try:
+            if self.access is not None and not await self.access.allows(
+                event.unified_msg_origin
+            ):
+                # 会话名单外：不注入，也不替换 future_task，只收起 AstrHe 自己的白天工具
+                self._hide_tools(req, UNLISTED_HIDDEN_TOOLS)
+                return
+        except Exception as exc:  # noqa: BLE001
+            self.logger.debug(f"[AstrHe] 判断会话名单失败: {exc}")
+        try:
             self._hide_future_task(req)
         except Exception as exc:  # noqa: BLE001
             self.logger.debug(f"[AstrHe] 隐藏 future_task 失败: {exc}")
@@ -64,15 +81,17 @@ class Injector:
             self.logger.debug(f"[AstrHe] 注入失败: {exc}")
 
     @staticmethod
-    def _hide_future_task(req: Any) -> None:
+    def _hide_tools(req: Any, names) -> None:
         func_tool = getattr(req, "func_tool", None)
         if func_tool is None:
             return
         tools = getattr(func_tool, "tools", None)
         if isinstance(tools, list):
-            func_tool.tools = [
-                t for t in tools if getattr(t, "name", "") != "future_task"
-            ]
+            func_tool.tools = [t for t in tools if getattr(t, "name", "") not in names]
+
+    @classmethod
+    def _hide_future_task(cls, req: Any) -> None:
+        cls._hide_tools(req, ("future_task",))
 
     async def build_injection(self, umo: str, viewer_id: str, same_persona=None) -> str:
         """组装注入文本；没有内容时返回空串。单独抽出来方便测试。

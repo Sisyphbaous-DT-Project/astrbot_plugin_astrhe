@@ -58,10 +58,13 @@ def segments_to_text(message: Any) -> str:
 class Backfiller:
     """夜间补拉器。"""
 
-    def __init__(self, storage: Storage, platform: PlatformHelper, logger: Any):
+    def __init__(
+        self, storage: Storage, platform: PlatformHelper, logger: Any, access=None
+    ):
         self.storage = storage
         self.platform = platform
         self.logger = logger
+        self.access = access
         self._merged_bot_count = 0
 
     async def candidate_sessions(
@@ -72,6 +75,7 @@ class Backfiller:
         候选 = 窗口内账本有消息的会话 ∪ 窗口内触发过的 AstrHe 闹钟目标
         ∪ bot 所在的全部群（每晚都枚举，停机期间说过话的安静群也能补齐）
         ∪（冷启动或窗口有空档时）近期私聊。
+        最后去掉会话名单外的会话：补拉直接找 QQ 要历史，AstrBot 的白名单管不到。
         """
         groups: set[str] = set()
         friends: set[str] = set()
@@ -129,6 +133,12 @@ class Backfiller:
             except Exception as exc:  # noqa: BLE001
                 self.logger.debug(f"[AstrHe] 取近期会话失败: {exc}")
 
+        if self.access is not None:
+            pid = self.platform.default_platform_id()
+            groups = {g for g in groups if await self.access.allows(group_umo(pid, g))}
+            friends = {
+                f for f in friends if await self.access.allows(friend_umo(pid, f))
+            }
         return sorted(groups), sorted(friends)
 
     async def backfill_all(

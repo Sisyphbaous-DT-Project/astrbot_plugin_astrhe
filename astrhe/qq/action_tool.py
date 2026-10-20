@@ -13,6 +13,7 @@ from .. import constants as C
 from ..platform import event_umo, parse_umo
 from ..timeutil import utc_now
 from .emoji_table import resolve_emoji, supported_meanings
+from .lookup_tool import UNLISTED_GROUP, group_allowed
 
 try:
     from astrbot.api import FunctionTool
@@ -52,6 +53,7 @@ class QQActionTool(_tool_base_class()):  # type: ignore[misc]
 
     qq_client: Any = None
     rate_limiter: Any = None
+    access: Any = None
     name: str = TOOL_NAME
     description: str = (
         "QQ 小动作工具（用来表达情绪和存在感，要有分寸，别频繁用）。可用动作：\n"
@@ -97,6 +99,10 @@ class QQActionTool(_tool_base_class()):  # type: ignore[misc]
             if kind == "GroupMessage":
                 kwargs["group_id"] = sid
         try:
+            if action == "poke" and not await group_allowed(
+                self.access, event, kwargs.get("group_id", "")
+            ):
+                return UNLISTED_GROUP
             return await self._dispatch(action, umo=umo, **kwargs)
         except Exception as exc:  # noqa: BLE001
             return f"操作失败: {exc}"

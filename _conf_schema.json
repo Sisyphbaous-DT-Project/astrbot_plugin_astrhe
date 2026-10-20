@@ -19,6 +19,24 @@
     "_special": "select_persona",
     "default": ""
   },
+  "session_whitelist": {
+    "type": "list",
+    "description": "会话白名单",
+    "items": {
+      "type": "string"
+    },
+    "hint": "AstrHe 只记录、复盘这些会话，也只给这些会话定闹钟（管理员亲口要求定闹钟的除外）。留空：沿用 AstrBot 的白名单（在 AstrBot「配置文件 → 访问控制 → 白名单」里开启并填写了名单才算设置好；AstrBot 也没设置时不限制）。填写：以这里为准，不再看 AstrBot 的白名单。逐项填写：用 /sid 获取的会话 ID（如 default:GroupMessage:123456、default:FriendMessage:123456），或直接写群号。管理员的私聊始终会被复盘，除非写进黑名单。",
+    "default": []
+  },
+  "session_blacklist": {
+    "type": "list",
+    "description": "会话黑名单",
+    "items": {
+      "type": "string"
+    },
+    "hint": "AstrBot 没有黑名单，这是 AstrHe 自己的。写进来的会话一律不碰：不记录、不复盘、不定闹钟（管理员亲口要求定闹钟的除外），优先级高于白名单。适合 bot 在群里照常聊天、但不想拿这个群来复盘的情况。写法同白名单。",
+    "default": []
+  },
   "frontend_landscape": {
     "type": "string",
     "description": "横屏打开时使用的前端",

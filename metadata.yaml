@@ -1,7 +1,7 @@
 name: astrbot_plugin_astrhe
 display_name: AstrHe
 desc: 让 bot 拥有自己的想法：每天零点复盘当天聊天，自己规划明天要做的事、定好闹钟，白天带着计划聊天，到点主动去做。
-version: 0.3.1
+version: 0.4.0
 author: C₂₂H₂₅NO₆
 repo: https://github.com/Sisyphbaous-DT-Project/astrbot_plugin_astrhe
 support_platforms:

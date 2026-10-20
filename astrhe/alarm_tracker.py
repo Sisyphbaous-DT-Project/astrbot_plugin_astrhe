@@ -211,6 +211,52 @@ class AlarmTracker:
             )
         return dropped
 
+    async def cancel_unlisted(
+        self, access: Any, *, admins=(), dry: bool = False
+    ) -> str:
+        """目标已不在会话名单里的生效闹钟：管理员白天亲口定的保留，其余取消。
+
+        正在执行的跳过，下一晚再看；演练只报告不取消。
+        """
+        admin_ids = {str(a) for a in admins}
+        cancelled, kept, failed = [], [], []
+        for alarm in await self.storage.alarms.live_alarms():
+            if alarm["status"] == "fired" or await access.allows(alarm["target_umo"]):
+                continue
+            label = f"#{alarm['id']} → {alarm['target_umo']}"
+            if alarm["origin"] == "day" and str(alarm["creator_id"]) in admin_ids:
+                kept.append(label)
+                continue
+            if dry:
+                cancelled.append(f"{label}（演练，未实际取消）")
+                continue
+            if alarm["cron_job_id"]:
+                try:
+                    await self.context.cron_manager.delete_job(alarm["cron_job_id"])
+                except Exception as exc:  # noqa: BLE001
+                    failed.append(f"{label}（{exc}）")
+                    continue
+            note = "目标会话已不在会话名单里，自动取消"
+            await self.storage.alarms.set_status(alarm["id"], "cancelled", note)
+            await self.storage.alarms.add_event(alarm["id"], "cancelled", note)
+            cancelled.append(label)
+        lines = []
+        if cancelled:
+            lines.append(
+                "目标已不在会话名单里、已自动取消的闹钟：" + "、".join(cancelled)
+            )
+        if kept:
+            lines.append(
+                "目标不在会话名单里、由管理员定下而保留的闹钟（不要再往这些会话安排事）："
+                + "、".join(kept)
+            )
+        if failed:
+            lines.append(
+                "目标不在会话名单里、但取消失败而保留原状态的闹钟（下次对账再试）："
+                + "、".join(failed)
+            )
+        return "\n".join(lines)
+
     async def nightly_reconcile(self, window_start=0, window_end=None) -> str:
         """完整回流窗口内触发或应触发的闹钟，发送结果独立于生命周期。"""
         await self.finalize_stale_started()

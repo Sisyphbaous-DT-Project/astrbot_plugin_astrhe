@@ -32,6 +32,9 @@ def format_message_line(row: dict, tz) -> str:
     return f"[{dt.strftime('%m-%d %H:%M')}] {prefix}{name}({row['sender_id']}): {text}  #{mid}"
 
 
+_UNLISTED = "这个会话不在 AstrHe 的会话名单里，它的聊天记录不再读取"
+
+
 class ReaderTools:
     """只读工具工厂。"""
 
@@ -43,6 +46,7 @@ class ReaderTools:
         window_getter,
         secrecy_resolver: Any = None,
         run_id: int | None = None,
+        access: Any = None,
     ):
         self.storage = storage
         self.context = context
@@ -50,6 +54,11 @@ class ReaderTools:
         self._window_getter = window_getter
         self.secrecy_resolver = secrecy_resolver
         self.run_id = run_id
+        self.access = access
+
+    async def _allowed(self, umo: str) -> bool:
+        """会话名单外的旧记录留着，但不再给夜间读取。"""
+        return self.access is None or await self.access.allows(umo)
 
     def _tz(self):
         return self._tz_getter()
@@ -194,6 +203,7 @@ class ReaderTools:
     async def _list_sessions(self, event: Any, **kwargs: Any) -> str:
         start_ts, end_ts = self._window_getter()
         umos = await self.storage.ledger.list_session_umos(start_ts)
+        umos = [u for u in umos if await self._allowed(u)]
         if not umos:
             return "窗口内没有任何聊天记录"
         lines = []
@@ -207,6 +217,8 @@ class ReaderTools:
     async def _read_messages(self, event: Any, umo: str = "", **kwargs: Any) -> str:
         if not umo:
             return "需要 umo 参数"
+        if not await self._allowed(umo):
+            return _UNLISTED
         before_row_id = kwargs.get("before_row_id")
         rows = await self.storage.ledger.get_messages_page(
             umo, before_row_id=before_row_id, limit=C.READ_MESSAGES_PAGE_LIMIT
@@ -224,6 +236,8 @@ class ReaderTools:
     ) -> str:
         if not keyword:
             return "需要 keyword 参数"
+        if umo and not await self._allowed(umo):
+            return _UNLISTED
         rows = await self.storage.ledger.search_messages(
             keyword,
             0,
@@ -235,7 +249,9 @@ class ReaderTools:
             return f"没有找到含「{keyword}」的消息"
         tz = self._tz()
         more = len(rows) > 50
-        rows = rows[:50]
+        rows = [r for r in rows[:50] if await self._allowed(r["umo"])]
+        if not rows and not more:
+            return f"没有找到含「{keyword}」的消息"
         lines = [f"{r['umo']} " + format_message_line(r, tz) for r in rows]
         suffix = (
             f"\n还有更多，继续翻传 offset={max(0, int(kwargs.get('offset', 0))) + 50}"
@@ -254,7 +270,7 @@ class ReaderTools:
             )
         else:
             row = await self.storage.ledger.get_message_by_platform_id(mid)
-        if not row or row["recalled"]:
+        if not row or row["recalled"] or not await self._allowed(row["umo"]):
             return "账本里找不到这条消息"
         rows = await self.storage.ledger.get_message_context(row["umo"], row["ts"])
         tz = self._tz()

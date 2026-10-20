@@ -42,6 +42,7 @@ class NightPipeline:
         friend_request_manager: Any,
         internal_tools_provider,
         logger: Any,
+        session_access: Any = None,
     ):
         self.storage = storage
         self.context = context
@@ -56,6 +57,7 @@ class NightPipeline:
         self.friend_requests = friend_request_manager
         self._internal_tools_provider = internal_tools_provider
         self.logger = logger
+        self.access = session_access
 
         self.stage = "init"
         self.stage_since = time.time()
@@ -250,6 +252,15 @@ class NightPipeline:
                 )
             except Exception as exc:  # noqa: BLE001
                 reconcile_text = f"对账失败: {exc}"
+            if self.access is not None:
+                try:
+                    unlisted = await tracker.cancel_unlisted(
+                        self.access, admins=self._admins(), dry=dry
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    unlisted = f"检查会话名单外的闹钟失败: {exc}"
+                if unlisted:
+                    reconcile_text += "\n" + unlisted
 
         # ③ 汇报子代理
         self._set_stage("report")
@@ -259,6 +270,9 @@ class NightPipeline:
         )
         persona_prompt = selected.prompt
         umos = await self.storage.ledger.list_session_umos(window_start)
+        # 会话名单外的旧记录留着但不再复盘
+        if self.access is not None:
+            umos = await self.access.filter_umos(umos)
         # 白天人格和夜间人格不同的会话：汇报换人格，规划与审稿拿到对照
         personas = await resolve_session_personas(self.context, selected, umos)
         if personas.differing:
@@ -327,6 +341,7 @@ class NightPipeline:
             self.rate_limiter,
             self.qq,
             admins=admins,
+            access=self.access,
         )
         last_run = await self.storage.runs.previous_run(run_id)
         last_failed = bool(

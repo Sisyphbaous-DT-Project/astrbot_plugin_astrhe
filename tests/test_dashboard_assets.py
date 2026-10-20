@@ -68,6 +68,9 @@ def test_every_relative_import_gets_asset_token_from_real_rewriter():
         sys.path.insert(0, str(ASTRBOT_SOURCE))
     from astrbot.dashboard.services.plugin_page_service import PluginPageService
 
+    if not hasattr(PluginPageService, "rewrite_plugin_page_js"):
+        # 4.29.0-beta.2 起令牌放进页面路径，服务端不再改写 JS，相对引用自然带上令牌
+        pytest.skip("这个 AstrBot 版本不再改写插件页面的 JS")
     service = PluginPageService.__new__(PluginPageService)
     total = 0
     for path in ASSETS.glob("*.js"):
