@@ -126,7 +126,7 @@
 
 ## 版本
 
-当前版本 **0.4.0**，详见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本 **0.4.1**，详见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 许可证
 

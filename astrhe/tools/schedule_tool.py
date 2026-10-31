@@ -302,6 +302,27 @@ class ScheduleToolImpl:
     def _is_cron_event(self, event: Any) -> bool:
         return event.get_extra("cron_payload") is not None
 
+    def _running_job_id(self, event: Any) -> str:
+        """闹钟唤醒时返回正在执行的平台任务编号，平时聊天返回空串。"""
+        cron_job = event.get_extra("cron_job")
+        if isinstance(cron_job, dict):
+            return str(cron_job.get("id") or "")
+        return ""
+
+    async def _remove_job(self, event: Any, job_id: str) -> bool:
+        """删除平台任务；要删的正是这次唤醒自己时改为停用，并返回 False。
+
+        AstrBot 4.29.4 起 delete_job 会先取消该任务正在执行的那次运行并等它结束，
+        而工具在单独的任务里执行，运行中删除自己会互相等待、永远卡住。
+        停用后不会再触发：一次性任务在这次运行结束后由 AstrBot 自行删除，
+        其余停用记录随夜间对账或闹钟记录的清理一并删掉。
+        """
+        if job_id == self._running_job_id(event):
+            await self.context.cron_manager.update_job(job_id, enabled=False)
+            return False
+        await self.context.cron_manager.delete_job(job_id)
+        return True
+
     async def _hidden_from_caller(self, event: Any, alarm: dict, sender_id: str) -> bool:
         """与闹钟列表同一套保密判断：对当前调用者保密的闹钟当作不存在。"""
         current_umo = ""
@@ -389,7 +410,7 @@ class ScheduleToolImpl:
                 except Exception as exc:  # noqa: BLE001
                     return f"修改定时任务失败，旧闹钟已保留: {exc}"
                 try:
-                    await self.context.cron_manager.delete_job(alarm["cron_job_id"])
+                    await self._remove_job(event, alarm["cron_job_id"])
                 except Exception as exc:
                     # 删除旧任务失败时撤销新任务，避免出现两个提醒。
                     try:
@@ -453,9 +474,11 @@ class ScheduleToolImpl:
             if not is_admin:
                 return "外部任务只有管理员能取消"
             try:
-                await self.context.cron_manager.delete_job(job_id)
+                removed = await self._remove_job(event, job_id)
             except Exception as exc:  # noqa: BLE001
                 return f"取消失败: {exc}"
+            if not removed:
+                return f"外部任务 {job_id} 已停用：这次唤醒会正常做完，之后不再触发"
             return f"外部任务 {job_id} 已取消"
         try:
             alarm_id = int(alarm_id)
@@ -471,13 +494,16 @@ class ScheduleToolImpl:
         deny = self._check_manage(event, alarm, is_admin)
         if deny:
             return deny
+        removed = True
         if alarm["cron_job_id"]:
             try:
-                await self.context.cron_manager.delete_job(alarm["cron_job_id"])
+                removed = await self._remove_job(event, alarm["cron_job_id"])
             except Exception as exc:  # noqa: BLE001
                 # 平台任务没删掉就不能标记已取消，否则重启后它会恢复
                 return f"取消失败，闹钟保持原状态：{exc}"
         await self.storage.alarms.set_status(alarm_id, "cancelled")
+        if not removed:
+            return f"闹钟 #{alarm_id} 已取消：这次唤醒会正常做完，之后不再触发"
         return f"闹钟 #{alarm_id} 已取消"
 
     def _check_manage(self, event: Any, alarm: dict, is_admin: bool) -> str:
