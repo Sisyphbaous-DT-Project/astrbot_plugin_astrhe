@@ -4,8 +4,8 @@
   astrhe_ 前缀的白天工具（只读的 astrhe_qq_lookup / astrhe_read_plan 除外）。
 - 代理：把 None / MessageEventResult 结果转成文字，并调用 event.clear_result()，
   防止执行器触发真实发送（astr_agent_tool_exec.py:716-731）。
-- 外部工具超时沿用 AstrBot 配置 agent_runner.config.misc.tool_call_timeout
-  （缺省 120 秒）；超时只返回文字说明，不终止当晚运行。
+- 外部工具超时沿用 AstrBot 配置的工具超时（4.30 键 agent.config.misc.tool_call_timeout，
+  旧版 agent_runner.config.misc.tool_call_timeout，缺省 120 秒）；超时只返回文字说明，不终止当晚运行。
 """
 
 from __future__ import annotations
@@ -48,15 +48,20 @@ def is_blacklisted(name: str) -> bool:
 
 
 def get_external_tool_timeout(astrbot_config: Any) -> int:
-    """取 AstrBot 配置的外部工具超时（秒），取不到用默认 120。"""
-    try:
-        cfg = astrbot_config.get("agent_runner", {}) or {}
-        misc = cfg.get("config", {}).get("misc", {}) or {}
-        value = misc.get("tool_call_timeout")
-        if isinstance(value, int) and value > 0:
-            return value
-    except Exception:  # noqa: BLE001
-        pass
+    """取 AstrBot 配置的外部工具超时（秒），取不到用默认 120。
+
+    4.30 起配置键从 agent_runner.config.misc.tool_call_timeout
+    改为 agent.config.misc.tool_call_timeout，两版都试。
+    """
+    for key in ("agent", "agent_runner"):
+        try:
+            cfg = astrbot_config.get(key, {}) or {}
+            misc = cfg.get("config", {}).get("misc", {}) or {}
+            value = misc.get("tool_call_timeout")
+            if isinstance(value, int) and value > 0:
+                return value
+        except Exception:  # noqa: BLE001
+            pass
     return C.EXTERNAL_TOOL_TIMEOUT_DEFAULT
 
 

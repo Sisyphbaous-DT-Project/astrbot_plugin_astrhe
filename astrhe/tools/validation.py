@@ -135,7 +135,8 @@ async def validate_alarm(
     """验证会话、平台、卡片和时间。私聊非好友只给提醒，不阻止创建。
 
     access 给出时检查会话名单：名单外的目标拒绝；allow_unlisted（管理员亲口要求）
-    时照办，只在提醒里说明。
+    时照办，只在提醒里说明——但宿主停用（整体停用或对本插件停用）不能越过，
+    管理员也一样拒绝。
     """
     pid = qq.platform.default_platform_id()
     if not pid:
@@ -144,13 +145,26 @@ async def validate_alarm(
     result["target_umo"] = resolve_session_ref(payload.get("target_umo", ""), pid)
     _, kind, sid = parse_umo(result["target_umo"])
     warning = ""
-    if access is not None and not await access.allows(result["target_umo"]):
-        if not allow_unlisted:
+    if access is not None:
+        reason = await access.reject_reason(result["target_umo"])
+        if reason == "host_disabled":
             raise ValueError(
-                f"会话 {result['target_umo']} 不在 AstrHe 的会话名单里"
-                "（插件白名单、黑名单或 AstrBot 访问控制），不能给它定闹钟"
+                f"会话 {result['target_umo']} 已被 AstrBot 停用（整体停用或对本插件停用），"
+                "不能给它定闹钟"
             )
-        warning = "这个会话不在 AstrHe 的会话名单里，按管理员的要求照办"
+        if reason:
+            if allow_unlisted and not await access.allows_alarm(
+                result["target_umo"], day_admin=True
+            ):
+                raise ValueError(
+                    f"会话 {result['target_umo']} 不在宿主允许的会话名单里，不能给它定闹钟"
+                )
+            if not allow_unlisted:
+                raise ValueError(
+                    f"会话 {result['target_umo']} 不在 AstrHe 的会话名单里"
+                    "（插件白名单、黑名单或 AstrBot 访问控制），不能给它定闹钟"
+                )
+            warning = "这个会话不在 AstrHe 的会话名单里，按管理员的要求照办"
     if kind == "GroupMessage":
         groups = await qq.group_ids()
         if groups is None:
@@ -233,7 +247,7 @@ async def validate_night_alarm_frequency(
 
 
 async def validate_alarm_cancel(
-    storage, alarm_id: int, *, admins=(), evidence_message_id: str = ""
+    storage, alarm_id: int, *, admins=(), evidence_message_id: str = "", access=None
 ) -> dict:
     """草稿与执行共用：重复任务可撤销，管理员安排必须有有效依据。"""
     alarm = await storage.alarms.get_alarm(alarm_id)
@@ -251,7 +265,13 @@ async def validate_alarm_cancel(
         raise ValueError(f"闹钟 #{alarm_id} 已执行或不再等待执行，不能取消")
     if not alarm["cron_job_id"]:
         raise ValueError(f"闹钟 #{alarm_id} 没有关联的定时任务")
-    admin_ids = {str(x) for x in admins if str(x).isdigit()}
+    admin_ids = (
+        access.target_admins(alarm["target_umo"])
+        if access
+        else {str(x) for x in admins if str(x).isdigit()}
+    )
+    if admin_ids is None:
+        raise ValueError("暂时无法确认目标会话的管理员，未取消闹钟")
     if alarm["creator_id"] in admin_ids:
         mid = str(evidence_message_id).strip().lstrip("#")
         if not mid:

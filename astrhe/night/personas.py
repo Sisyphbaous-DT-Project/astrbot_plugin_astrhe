@@ -18,6 +18,11 @@ from astrbot.api import logger
 _PLATFORM_NAME = "aiocqhttp"
 _LOOKUP = object()
 
+#: resolve_selected_persona 是否还接受 conversation_persona_id（AstrBot 4.29.x）。
+#: 4.30 起会话人格写进有效配置，接口只收 umo/platform_name 并返回三元组；
+#: 旧版返回四元组。两版的「webchat 特殊默认人格」标志都在返回值末位。
+_WANTS_CONVERSATION_PARAM: dict[int, bool] = {}
+
 
 @dataclass(frozen=True)
 class PersonaInfo:
@@ -107,6 +112,31 @@ async def _current_conversation(context: Any, umo: str) -> Any:
     return await manager.get_conversation(umo, cid)
 
 
+def _wants_conversation_param(fn: Any) -> bool:
+    """探测 resolve_selected_persona 是否接受 conversation_persona_id。"""
+    key = id(getattr(fn, "__func__", fn))
+    cached = _WANTS_CONVERSATION_PARAM.get(key)
+    if cached is None:
+        try:
+            cached = "conversation_persona_id" in inspect.signature(fn).parameters
+        except (TypeError, ValueError):
+            cached = False
+        _WANTS_CONVERSATION_PARAM[key] = cached
+    return cached
+
+
+def _webchat_default_prompt() -> str:
+    """面板网页对话的特殊默认人格提示词；取不到时用固定占位（比较用）。"""
+    try:
+        from astrbot.core.astr_agent_runtime.main_agent.persona import (
+            CHATUI_SPECIAL_DEFAULT_PERSONA_PROMPT,
+        )
+
+        return CHATUI_SPECIAL_DEFAULT_PERSONA_PROMPT
+    except Exception:  # noqa: BLE001 - 4.29 里常量在别处，占位文本仅供比较
+        return "__astrhe_webchat_default__"
+
+
 async def session_persona(
     context: Any,
     umo: str,
@@ -117,28 +147,32 @@ async def session_persona(
     """按 AstrBot 自己的规则解析会话人格；查不到返回 None。
 
     conversation 不传时自己读当前对话（夜间）；白天直接传请求里的对话。
+    4.30 从有效配置解析，旧 conversation 人格不再覆盖配置。
     """
     try:
         if conversation is _LOOKUP:
             conversation = await _current_conversation(context, umo)
-        (
-            persona_id,
-            persona,
-            _,
-            _,
-        ) = await context.persona_manager.resolve_selected_persona(
-            umo=umo,
-            conversation_persona_id=getattr(conversation, "persona_id", None),
-            platform_name=platform_name,
-        )
+        manager = context.persona_manager
+        kwargs: dict[str, Any] = {"umo": umo, "platform_name": platform_name}
+        if _wants_conversation_param(manager.resolve_selected_persona):
+            kwargs["conversation_persona_id"] = getattr(
+                conversation, "persona_id", None
+            )
+        result = await manager.resolve_selected_persona(**kwargs)
+        persona_id = result[0] if result else ""
+        persona = result[1] if len(result) > 1 else None
+        use_webchat_default = bool(result[-1]) if result else False
     except Exception as exc:  # noqa: BLE001 - 查不到就按设置人格处理
         logger.debug(f"[AstrHe] 读取会话人格失败（{umo}）：{exc}")
         return None
-    if not persona:
-        # 明确不用人格，或所选人格已被删除：白天在这里说话时不带人格提示词
-        return PersonaInfo(name=str(persona_id or ""), prompt="", none=True)
-    name, prompt = _fields(persona)
-    return PersonaInfo(name=name or str(persona_id or ""), prompt=prompt)
+    if persona:
+        name, prompt = _fields(persona)
+        return PersonaInfo(name=name or str(persona_id or ""), prompt=prompt)
+    if use_webchat_default:
+        # 面板网页对话的特殊默认人格：白天带一段专用提示词，不算「没有人格」
+        return PersonaInfo(name="_chatui_default_", prompt=_webchat_default_prompt())
+    # 明确不用人格，或所选人格已被删除：白天在这里说话时不带人格提示词
+    return PersonaInfo(name=str(persona_id or ""), prompt="", none=True)
 
 
 async def resolve_session_personas(

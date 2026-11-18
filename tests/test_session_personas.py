@@ -138,42 +138,91 @@ def test_real_astrbot_persona_resolution(monkeypatch):
     """用 AstrBot 真实的 resolve_selected_persona 核对调用方式与返回结构。"""
     import astrbot.core.persona_mgr as pm
 
-    class FakeSp:
-        async def get_async(self, scope, scope_id, key, default=None):
-            if scope_id == GROUP_UMO and key == "session_service_config":
-                return {"persona_id": "客服"}
-            return default
+    if hasattr(pm, "sp"):
+        # AstrBot 4.29.x：会话规则与对话自带人格
+        class FakeSp:
+            async def get_async(self, scope, scope_id, key, default=None):
+                if scope_id == GROUP_UMO and key == "session_service_config":
+                    return {"persona_id": "客服"}
+                return default
 
-    monkeypatch.setattr(pm, "sp", FakeSp())
-    cfg = {
-        "agent_runner": {
-            "runner_type": "local",
-            "config": {"persona": {"persona_id": "清漪"}},
+        monkeypatch.setattr(pm, "sp", FakeSp())
+        cfg = {
+            "agent_runner": {
+                "runner_type": "local",
+                "config": {"persona": {"persona_id": "清漪"}},
+            }
         }
-    }
-    acm = SimpleNamespace(default_conf=cfg, get_conf=lambda umo: cfg)
-    manager = pm.PersonaManager(None, acm)
-    manager.personas_v3 = [
-        {"name": "清漪", "prompt": "你是清漪。"},
-        {"name": "客服", "prompt": "你是耐心的客服小助手。"},
-    ]
-    ctx = SimpleNamespace(persona_manager=manager)
+        acm = SimpleNamespace(default_conf=cfg, get_conf=lambda umo: cfg)
+        manager = pm.PersonaManager(None, acm)
+        manager.personas_v3 = [
+            {"name": "清漪", "prompt": "你是清漪。"},
+            {"name": "客服", "prompt": "你是耐心的客服小助手。"},
+        ]
+        ctx = SimpleNamespace(persona_manager=manager)
 
-    async def check():
-        # 会话管理规则指定的人格
-        assert await session_persona(ctx, GROUP_UMO, conversation=None) == SERVICE
-        # 对话自带人格
-        conv = SimpleNamespace(persona_id="客服")
-        assert await session_persona(ctx, OTHER_UMO, conversation=conv) == SERVICE
-        # 配置文件默认人格
-        assert await session_persona(ctx, OTHER_UMO, conversation=None) == SELECTED
-        # 明确不用人格
-        none = await session_persona(
-            ctx, OTHER_UMO, conversation=SimpleNamespace(persona_id="[%None]")
+        async def check():
+            # 会话管理规则指定的人格
+            assert await session_persona(ctx, GROUP_UMO, conversation=None) == SERVICE
+            # 对话自带人格
+            conv = SimpleNamespace(persona_id="客服")
+            assert await session_persona(ctx, OTHER_UMO, conversation=conv) == SERVICE
+            # 配置文件默认人格
+            assert await session_persona(ctx, OTHER_UMO, conversation=None) == SELECTED
+            # 明确不用人格
+            none = await session_persona(
+                ctx, OTHER_UMO, conversation=SimpleNamespace(persona_id="[%None]")
+            )
+            assert none.none and none.prompt == ""
+
+        arun(check())
+    else:
+        # AstrBot 4.30：会话人格在有效配置覆盖里（acm.get_conf 应用覆盖），conversation 人格不再生效
+        THIRD_UMO = "default:FriendMessage:10003"
+
+        def _overrides(umo):
+            if umo == GROUP_UMO:
+                return {"agent.config.persona.persona_id": "客服"}
+            if umo == THIRD_UMO:
+                return {"agent.config.persona.persona_id": "[%None]"}
+            return {}
+
+        async def fake_get_overrides(umo):
+            return _overrides(umo)
+
+        monkeypatch.setattr(pm, "get_overrides", fake_get_overrides)
+        from astrbot.core.session_overrides import apply_overrides
+
+        cfg = {
+            "agent": {
+                "runtime": "astrbot",
+                "config": {"persona": {"persona_id": "清漪"}},
+            }
+        }
+        acm = SimpleNamespace(
+            default_conf=cfg,
+            get_conf=lambda umo: apply_overrides(cfg, _overrides(umo)),
         )
-        assert none.none and none.prompt == ""
+        manager = pm.PersonaManager(None, acm)
+        manager.personas_v3 = [
+            {"name": "清漪", "prompt": "你是清漪。"},
+            {"name": "客服", "prompt": "你是耐心的客服小助手。"},
+        ]
+        ctx = SimpleNamespace(persona_manager=manager)
 
-    arun(check())
+        async def check():
+            # 会话覆盖指定的人格
+            assert await session_persona(ctx, GROUP_UMO, conversation=None) == SERVICE
+            # 旧对话人格参数被忽略，按配置默认解析
+            conv = SimpleNamespace(persona_id="客服")
+            assert await session_persona(ctx, OTHER_UMO, conversation=conv) == SELECTED
+            # 配置文件默认人格
+            assert await session_persona(ctx, OTHER_UMO, conversation=None) == SELECTED
+            # 明确不用人格
+            none = await session_persona(ctx, THIRD_UMO, conversation=None)
+            assert none.none and none.prompt == ""
+
+        arun(check())
 
 
 def test_persona_material_only_when_differing():
@@ -426,25 +475,61 @@ def test_empty_persona_setting_compares_with_daytime_default():
 
 
 def test_empty_persona_setting_with_real_manager(monkeypatch):
-    """真实 PersonaManager：库里有别的人格、没有名为 default 的人格，留空设置不误判。"""
+    """真实 PersonaManager：设置人格留空时不把走默认的会话误判成不同人格。"""
     import astrbot.core.persona_mgr as pm
 
-    class FakeSp:
-        async def get_async(self, scope, scope_id, key, default=None):
-            return default
+    if hasattr(pm, "sp"):
+        # AstrBot 4.29.x：库里有别的人格、没有名为 default 的人格
+        class FakeSp:
+            async def get_async(self, scope, scope_id, key, default=None):
+                return default
 
-    monkeypatch.setattr(pm, "sp", FakeSp())
-    cfg = {
-        "agent_runner": {
-            "runner_type": "local",
-            "config": {"persona": {"persona_id": "default"}},
+        monkeypatch.setattr(pm, "sp", FakeSp())
+        cfg = {
+            "agent_runner": {
+                "runner_type": "local",
+                "config": {"persona": {"persona_id": "default"}},
+            }
         }
-    }
-    acm = SimpleNamespace(default_conf=cfg, get_conf=lambda umo: cfg)
-    manager = pm.PersonaManager(None, acm)
-    manager.personas_v3 = [{"name": "客服", "prompt": "你是耐心的客服小助手。"}]
-    conversations = FakeConversations({GROUP_UMO: "客服"})
-    ctx = SimpleNamespace(persona_manager=manager, conversation_manager=conversations)
+        acm = SimpleNamespace(default_conf=cfg, get_conf=lambda umo: cfg)
+        manager = pm.PersonaManager(None, acm)
+        manager.personas_v3 = [{"name": "客服", "prompt": "你是耐心的客服小助手。"}]
+        conversations = FakeConversations({GROUP_UMO: "客服"})
+        ctx = SimpleNamespace(
+            persona_manager=manager, conversation_manager=conversations
+        )
+    else:
+        # AstrBot 4.30：默认人格可在库里编辑，走默认与会话覆盖仍能区分
+        def _overrides(umo):
+            if umo == GROUP_UMO:
+                return {"agent.config.persona.persona_id": "客服"}
+            return {}
+
+        async def fake_get_overrides(umo):
+            return _overrides(umo)
+
+        monkeypatch.setattr(pm, "get_overrides", fake_get_overrides)
+        from astrbot.core.session_overrides import apply_overrides
+
+        cfg = {
+            "agent": {
+                "runtime": "astrbot",
+                "config": {"persona": {"persona_id": "default"}},
+            }
+        }
+        acm = SimpleNamespace(
+            default_conf=cfg,
+            get_conf=lambda umo: apply_overrides(cfg, _overrides(umo)),
+        )
+        manager = pm.PersonaManager(None, acm)
+        manager.personas_v3 = [
+            {"name": "default", "prompt": "You are a helpful and friendly assistant."},
+            {"name": "客服", "prompt": "你是耐心的客服小助手。"},
+        ]
+        conversations = FakeConversations({})
+        ctx = SimpleNamespace(
+            persona_manager=manager, conversation_manager=conversations
+        )
 
     async def check():
         selected = await selected_persona(ctx, "")

@@ -17,7 +17,7 @@ from tests.conftest import FakeContext, FakeEvent, FakeLogger, Plain, arun, make
 def test_version_and_only_approved_settings():
     root = Path(__file__).resolve().parents[1]
     metadata = yaml.safe_load((root / "metadata.yaml").read_text())
-    assert str(metadata["version"]) == "0.4.1" and "astrbot_version" not in metadata
+    assert str(metadata["version"]) == "0.5.0" and "astrbot_version" not in metadata
     settings = json.loads((root / "_conf_schema.json").read_text())
     assert set(settings) == {
         "enabled",

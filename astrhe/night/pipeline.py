@@ -43,6 +43,7 @@ class NightPipeline:
         internal_tools_provider,
         logger: Any,
         session_access: Any = None,
+        create_alarm_job=None,
     ):
         self.storage = storage
         self.context = context
@@ -58,6 +59,7 @@ class NightPipeline:
         self._internal_tools_provider = internal_tools_provider
         self.logger = logger
         self.access = session_access
+        self._create_alarm_job = create_alarm_job
 
         self.stage = "init"
         self.stage_since = time.time()
@@ -254,9 +256,7 @@ class NightPipeline:
                 reconcile_text = f"对账失败: {exc}"
             if self.access is not None:
                 try:
-                    unlisted = await tracker.cancel_unlisted(
-                        self.access, admins=self._admins(), dry=dry
-                    )
+                    unlisted = await tracker.cancel_unlisted(self.access, dry=dry)
                 except Exception as exc:  # noqa: BLE001
                     unlisted = f"检查会话名单外的闹钟失败: {exc}"
                 if unlisted:
@@ -342,6 +342,7 @@ class NightPipeline:
             self.qq,
             admins=admins,
             access=self.access,
+            create_alarm_job=self._create_alarm_job,
         )
         last_run = await self.storage.runs.previous_run(run_id)
         last_failed = bool(

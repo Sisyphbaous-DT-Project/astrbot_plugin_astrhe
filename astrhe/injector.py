@@ -9,6 +9,12 @@
 5. day_reminders 自我提醒（只给白天人格和夜间人格相同的会话）
 
 会话名单外的会话什么都不注入，也不替换 future_task。
+
+AstrHe 闹钟唤醒（4.30，事件带 astrhe_dispatch）：
+- 完整任务卡片先转成本轮临时 TextPart（可见但不进普通对话历史），
+  这一步先于名单早退判断；
+- 不做白天的规划/待办注入（与旧版唤醒路径一致，卡片即全部上下文）；
+- 所有程序化唤醒都不补回执。只在有宿主对话的普通请求末尾追加回执，由同一个 writer 保存。
 """
 
 from __future__ import annotations
@@ -43,6 +49,7 @@ class Injector:
         context: Any = None,
         persona_id_getter=None,
         access: Any = None,
+        sent_tracker: Any = None,
     ):
         self.storage = storage
         self._tz_getter = tz_getter
@@ -52,6 +59,7 @@ class Injector:
         self.context = context
         self._persona_id_getter = persona_id_getter
         self.access = access
+        self.sent_tracker = sent_tracker
 
     def _enabled(self) -> bool:
         try:
@@ -61,6 +69,18 @@ class Injector:
 
     async def on_llm_request(self, event: Any, req: Any) -> None:
         if not self._enabled():
+            return
+        if getattr(event, "event_kind", "") == "agent_wakeup":
+            event.set_extra(
+                "astrhe_request_cid",
+                str(getattr(getattr(req, "conversation", None), "cid", "") or ""),
+            )
+            card = event.get_extra("astrhe_card")
+            if card and event.get_extra("astrhe_dispatch") and TextPart is not None:
+                part = TextPart(text=card)
+                part.mark_as_temp()
+                req.extra_user_content_parts.append(part)
+                self._hide_future_task(req)
             return
         try:
             if self.access is not None and not await self.access.allows(
@@ -76,9 +96,18 @@ class Injector:
         except Exception as exc:  # noqa: BLE001
             self.logger.debug(f"[AstrHe] 隐藏 future_task 失败: {exc}")
         try:
+            await self._inject_receipts(event, req)
+        except Exception as exc:  # noqa: BLE001
+            self.logger.debug(f"[AstrHe] 补入回执失败: {exc}")
+        try:
             await self._inject(event, req)
         except Exception as exc:  # noqa: BLE001
             self.logger.debug(f"[AstrHe] 注入失败: {exc}")
+
+    async def _inject_receipts(self, event: Any, req: Any) -> None:
+        if self.sent_tracker is None or not self.sent_tracker._modern():
+            return
+        await self.sent_tracker.inject_into(event, req)
 
     @staticmethod
     def _hide_tools(req: Any, names) -> None:

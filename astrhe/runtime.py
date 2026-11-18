@@ -29,6 +29,7 @@ from .tools.memory_readers import PLAN_READ_PARAMETERS
 from .tools.schedule_tool import ScheduleToolImpl
 from .tools.secrecy import PresentResolver
 from .webapi import WebApi
+from .wakeup_compat import WakeupCompat
 
 try:
     from astrbot.core.star.star_tools import StarTools
@@ -76,6 +77,7 @@ class AstrHeRuntime:
             self.admins,
             self.friend_requests,
             access=self.access,
+            create_alarm_job=self._create_alarm_job,
         )
         self.reader_tools = ReaderTools(
             self.storage,
@@ -96,6 +98,15 @@ class AstrHeRuntime:
             access=self.access,
         )
         self.alarm_tracker = AlarmTracker(self.storage, context, self.tz, logger)
+        # 4.30 唤醒适配：只在能探测到新架构时安装包装，旧版 AstrBot 不受影响
+        self.wakeup_compat = WakeupCompat(
+            context=context,
+            storage=self.storage,
+            access=self.access,
+            alarm_tracker=self.alarm_tracker,
+            logger=logger,
+            enabled_getter=self.enabled,
+        )
         self.sent_tracker = SentTracker(
             self.storage,
             context,
@@ -104,7 +115,11 @@ class AstrHeRuntime:
             logger,
             self.enabled,
             access=self.access,
+            modern_mode_getter=self.wakeup_compat.modern,
         )
+        # injector 在名单判断之后补待发的主动发送回执（4.30 回执路径）
+        self.injector.sent_tracker = self.sent_tracker
+        self.wakeup_compat.on_turn_settled.append(self.sent_tracker.handle_turn_settled)
         self.scheduler = NightScheduler(self.storage, self.tz, self.run_night, logger)
         self.webapi = WebApi(
             self.storage,
@@ -126,6 +141,9 @@ class AstrHeRuntime:
             return bool(self.config.get("enabled", False))
         except Exception:  # noqa: BLE001
             return False
+
+    async def _create_alarm_job(self, **kwargs):
+        return await self.wakeup_compat.create_alarm_job(**kwargs)
 
     def frontend_choices(self) -> tuple[str, str]:
         """档案终端横屏、竖屏各用哪套前端（非法值由接口回退默认）。"""
@@ -157,12 +175,25 @@ class AstrHeRuntime:
 
     async def initialize(self) -> None:
         await self.storage.open()
+        if self.wakeup_compat.modern():
+            if not self.wakeup_compat.install():
+                self.wakeup_compat.install_guard()
+                await self.wakeup_compat.park_jobs()
+                self.logger.error(
+                    "[AstrHe] 未找到受支持的原生执行环境，只暂停 AstrHe 闹钟"
+                )
+            elif self.enabled():
+                await self.wakeup_compat.park_jobs(restore=True)
+            else:
+                await self.wakeup_compat.park_jobs()
         if not self.enabled():
             self.logger.info("[AstrHe] 插件未启用（enabled=false），只初始化存储")
             return
         self._register_tools()
         self.webapi.register()
         self.scheduler.start()
+        # 4.30 回执路径的崩溃恢复：注入到一半退出的先查稳定标记再定去留
+        await self.sent_tracker.recover_receipts()
         await self.cancel_unlisted_alarms()
         self.logger.info("[AstrHe] 已启用：零点调度、记录器、白天注入与工具已就绪")
 
@@ -172,9 +203,7 @@ class AstrHeRuntime:
         AstrBot 启动时插件先于定时任务调度加载，这里删掉的任务不会再被排上。
         """
         try:
-            text = await self.alarm_tracker.cancel_unlisted(
-                self.access, admins=self.admins()
-            )
+            text = await self.alarm_tracker.cancel_unlisted(self.access)
         except Exception as exc:  # noqa: BLE001
             self.logger.warning(f"[AstrHe] 清理会话名单外的闹钟失败: {exc}")
             return
@@ -183,6 +212,8 @@ class AstrHeRuntime:
 
     async def terminate(self) -> None:
         await self.scheduler.stop()
+        # 先停接收新的自有派发、收拢闹钟 turn 的观察者，再恢复宿主包装
+        await self.wakeup_compat.uninstall()
         await self.sent_tracker.stop()
         # 进行中的运行由 scheduler.stop() 取消，pipeline 内部按
         # 「提交前判失败、提交后外部动作照常收尾」的规则收尾
@@ -372,6 +403,7 @@ class AstrHeRuntime:
             internal_tools_provider=self._internal_tools_provider,
             logger=self.logger,
             session_access=self.access,
+            create_alarm_job=self._create_alarm_job,
         )
         pipeline.alarm_tracker = self.alarm_tracker
         pipeline.external_tasks = self._external_tasks

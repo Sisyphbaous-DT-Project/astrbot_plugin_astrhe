@@ -120,8 +120,9 @@ def test_astrbot_whitelist_uses_each_session_config():
     assert not access.list_allows(UNLISTED)  # 这个群分到的配置开了白名单且没列它
 
 
-def test_plugin_whitelist_overrides_astrbot_and_blacklist_wins():
-    ctx = FakeContext(config=_astrbot_config(ids=["20002"]))
+def test_plugin_whitelist_narrows_and_blacklist_wins():
+    # AstrBot 白名单关着时，插件白名单自己收窄；黑名单始终最优先
+    ctx = FakeContext(config=_astrbot_config(enabled=False))
     access = _access(
         ctx,
         {
@@ -130,10 +131,49 @@ def test_plugin_whitelist_overrides_astrbot_and_blacklist_wins():
             "session_blacklist": [ADMIN_PRIVATE],
         },
     )
-    assert access.list_allows(UNLISTED)  # AstrBot 拦着，但插件白名单写了它
-    assert not access.list_allows(ALLOWED)  # AstrBot 放行，但插件白名单没写它
+    assert access.list_allows(UNLISTED)  # 插件白名单写了它（隔离写法按群号对齐）
+    assert not access.list_allows(ALLOWED)  # 插件白名单没写它
     assert access.list_allows(STRANGER_PRIVATE)
     assert not access.list_allows(ADMIN_PRIVATE)  # 黑名单连管理员私聊也拦
+
+
+def test_host_whitelist_is_outermost_limit():
+    # AstrBot 白名单开着时，插件白名单只能再收窄，不能越过它
+    ctx = FakeContext(config=_astrbot_config(ids=["20002"]))
+    access = _access(ctx, {"session_whitelist": [UNLISTED, ALLOWED]})
+    assert not access.list_allows(UNLISTED)  # 插件白名单写了它，但 AstrBot 拦着
+    assert not access.list_allows(ALLOWED + "x")  # 两边都没写
+    assert access.list_allows(ALLOWED)  # 两边都放行才行
+    # 管理员私聊与 webchat 豁免名单级限制（与 AstrBot 一致）
+    assert access.list_allows(ADMIN_PRIVATE)
+    assert access.list_allows("webchat:FriendMessage:webchat!astrbot!abc")
+
+
+def test_routed_policy_does_not_cross_isolated_speakers_or_default_admin(monkeypatch):
+    raw = "default:GroupMessage:50005_20002"
+    other = "default:GroupMessage:60006_20002"
+    cfg = _astrbot_config(ids=[other])
+    cfg["admins_id"] = []
+    ctx = RoutedContext({raw: cfg, ADMIN_PRIVATE: cfg}, _astrbot_config(enabled=False))
+    gate = _access(ctx)
+    assert not gate.list_allows(raw) and not gate.list_allows(ADMIN_PRIVATE)
+    cfg["platform_settings"]["id_whitelist"] = ["20002"]
+    assert gate.list_allows(raw)
+    cfg["admins_id"] = ["10001"]
+    cfg["platform_settings"]["wl_ignore_admin_on_friend"] = False
+    assert not gate.list_allows(ADMIN_PRIVATE)
+    monkeypatch.setattr(access_mod, "SessionServiceManager", None)
+    cfg["disabled_plugins"] = ["astrbot_plugin_astrhe"]
+    cfg["platform_settings"]["id_whitelist"] = ["30003"]
+    assert arun(gate.reject_reason(raw)) == "host_disabled"
+    assert not arun(gate.allows_alarm(raw, day_admin=True))
+    cfg["disabled_plugins"] = []
+    cfg["plugin_set"] = ["*", "other"]
+    assert arun(gate.reject_reason(raw)) == "host_disabled"
+    cfg["plugin_set"] = ["*"]
+    cfg["platform_settings"]["id_blacklist"] = ["10001"]
+    cfg["platform_settings"]["enable_id_white_list"] = False
+    assert arun(gate.allows(ADMIN_PRIVATE))
 
 
 def test_astrbot_read_failure_falls_back_to_plugin_lists_with_one_warning():
@@ -146,32 +186,69 @@ def test_astrbot_read_failure_falls_back_to_plugin_lists_with_one_warning():
     assert len(logger.warnings) == 1
 
 
+def _cfg430(id_blacklist=(), disabled=(), plugin_set=None):
+    """4.30 有效配置：会话停用与单插件停用都写在配置里。"""
+    cfg = _astrbot_config(enabled=False)
+    cfg["platform_settings"]["id_blacklist"] = list(id_blacklist)
+    cfg["disabled_plugins"] = list(disabled)
+    if plugin_set is not None:
+        cfg["plugin_set"] = list(plugin_set)
+    return cfg
+
+
 def test_astrbot_session_management_is_respected(monkeypatch):
-    # 真实 AstrBot 里能找到会话管理模块
-    assert access_mod.SessionServiceManager is not None
-    assert access_mod.SessionPluginManager is not None
-    calls = []
+    if access_mod.SessionServiceManager is not None:
+        # AstrBot 4.29.x：真实会话管理模块
+        calls = []
 
-    class Service:
-        @staticmethod
-        async def is_session_enabled(umo):
-            return umo != "default:GroupMessage:60006"
+        class Service:
+            @staticmethod
+            async def is_session_enabled(umo):
+                return umo != "default:GroupMessage:60006"
 
-    class Plugins:
-        @staticmethod
-        async def is_plugin_enabled_for_session(umo, name):
-            calls.append((umo, name))
-            return umo != "default:GroupMessage:70007"
+        class Plugins:
+            @staticmethod
+            async def is_plugin_enabled_for_session(umo, name):
+                calls.append((umo, name))
+                return umo != "default:GroupMessage:70007"
 
-    monkeypatch.setattr(access_mod, "SessionServiceManager", Service)
-    monkeypatch.setattr(access_mod, "SessionPluginManager", Plugins)
-    access = _access(FakeContext(config=_astrbot_config(enabled=False)))
+        monkeypatch.setattr(access_mod, "SessionServiceManager", Service)
+        monkeypatch.setattr(access_mod, "SessionPluginManager", Plugins)
+        access = _access(FakeContext(config=_astrbot_config(enabled=False)))
+        assert arun(access.allows(ALLOWED))
+        assert not arun(access.allows("default:GroupMessage:60006"))
+        assert not arun(access.allows("default:GroupMessage:70007"))
+        assert ("default:GroupMessage:70007", "astrbot_plugin_astrhe") in calls
+        # 会话管理只看完整判断；逐条消息的名单判断不查它
+        assert access.list_allows("default:GroupMessage:60006")
+        return
+    # AstrBot 4.30：会话停用读有效配置（id_blacklist / disabled_plugins / plugin_set）
+    access = _access(FakeContext(config=_cfg430(id_blacklist=["60006"])))
     assert arun(access.allows(ALLOWED))
-    assert not arun(access.allows("default:GroupMessage:60006"))
-    assert not arun(access.allows("default:GroupMessage:70007"))
-    assert ("default:GroupMessage:70007", "astrbot_plugin_astrhe") in calls
-    # 会话管理只看完整判断；逐条消息的名单判断不查它
-    assert access.list_allows("default:GroupMessage:60006")
+    assert not arun(access.allows("default:GroupMessage:60006"))  # 完整会话 ID 命中
+    assert access.list_allows("default:GroupMessage:60006")  # 名单级判断不查停用
+    access = _access(FakeContext(config=_cfg430(id_blacklist=["30003"])))
+    assert not arun(access.allows(UNLISTED))  # 纯群号命中
+    assert not arun(access.allows("default:GroupMessage:55555_30003"))  # 隔离原始写法
+    access = _access(
+        FakeContext(
+            config=_cfg430(id_blacklist=[ADMIN_PRIVATE]),
+        )
+    )
+    assert not arun(access.allows(ADMIN_PRIVATE))  # 停用不豁免管理员私聊
+    access = _access(
+        FakeContext(config=_cfg430(disabled=["astrbot_plugin_astrhe"])),
+    )
+    assert not arun(access.allows(ALLOWED))  # 单独对本插件停用
+    access = _access(FakeContext(config=_cfg430(plugin_set=["other_plugin"])))
+    assert not arun(access.allows(ALLOWED))  # plugin_set 显式不含本插件
+    access = _access(FakeContext(config=_cfg430(plugin_set=[])))
+    assert not arun(access.allows(ALLOWED))  # plugin_set 空列表等于全部禁用
+    access = _access(FakeContext(config=_cfg430(plugin_set=["*"])))
+    assert arun(access.allows(ALLOWED))
+    # restricted：会话黑名单也算了「设置了限制」
+    assert _access(FakeContext(config=_cfg430(id_blacklist=["60006"]))).restricted()
+    assert not _access(FakeContext(config=_cfg430())).restricted()
 
 
 # ---------------- 记录与补拉 ----------------
@@ -363,10 +440,10 @@ def test_reconcile_cancels_unlisted_alarms_except_admin_day_ones(tmp_path):
                     run_at=utc_now() + 86400,
                 )
             tracker = AlarmTracker(s, ctx, lambda: TZ, FakeLogger())
-            dry_text = await tracker.cancel_unlisted(access, admins=["10001"], dry=True)
+            dry_text = await tracker.cancel_unlisted(access, dry=True)
             assert "演练" in dry_text and not ctx.cron_manager.deleted
 
-            text = await tracker.cancel_unlisted(access, admins=["10001"])
+            text = await tracker.cancel_unlisted(access)
             status = {
                 k: (await s.alarms.get_alarm(v))["status"] for k, v in ids.items()
             }
@@ -382,6 +459,64 @@ def test_reconcile_cancels_unlisted_alarms_except_admin_day_ones(tmp_path):
             await s.close()
 
     arun(main())
+
+
+def test_target_admins_control_creation_reconciliation_and_management(tmp_path):
+    async def scenario():
+        storage = await make_storage(tmp_path)
+        try:
+            target_cfg = _astrbot_config(ids=["20002"])
+            target_cfg["admins_id"] = ["50005"]
+            ctx = RoutedContext(
+                {UNLISTED: target_cfg},
+                _astrbot_config(enabled=False),
+                api_actions={"get_group_list": [{"group_id": 30003}]},
+            )
+            access = _access(ctx, {"session_blacklist": ["30003"]})
+            qq = _qq(ctx)
+            impl = ScheduleToolImpl(
+                storage,
+                ctx,
+                qq,
+                RateLimiter(storage, lambda: TZ),
+                lambda: TZ,
+                PresentResolver(storage, qq),
+                lambda: ["10001"],
+                access=access,
+            )
+
+            async def create(sender):
+                return await impl.run(
+                    FakeEvent(umo=ADMIN_PRIVATE, sender_id=sender, role="admin"),
+                    action="create",
+                    target_type="group",
+                    target_id="30003",
+                    **ALARM_CARD,
+                )
+
+            assert "闹钟未创建" in await create("10001")
+            assert not ctx.cron_manager.added
+            assert "定好了" in await create("50005")
+            row = (await storage.alarms.live_alarms())[0]
+            member = FakeEvent(umo=UNLISTED, sender_id="40004")
+            assert "只有管理员" in await impl.run(member, "cancel", alarm_id=row["id"])
+            from astrhe.tools.validation import validate_alarm_cancel
+            import pytest
+
+            with pytest.raises(ValueError, match="管理员本人"):
+                await validate_alarm_cancel(
+                    storage, row["id"], admins=["10001"], access=access
+                )
+            tracker = AlarmTracker(storage, ctx, lambda: TZ, FakeLogger())
+            assert "保留" in await tracker.cancel_unlisted(access)
+            assert not ctx.cron_manager.deleted
+            target_cfg["admins_id"] = []
+            assert "已自动取消" in await tracker.cancel_unlisted(access)
+            assert ctx.cron_manager.deleted == [row["cron_job_id"]]
+        finally:
+            await storage.close()
+
+    arun(scenario())
 
 
 # ---------------- 夜间读取、白天注入、发送留存 ----------------
@@ -665,7 +800,7 @@ def test_cancel_failure_is_reported_on_its_own_line(tmp_path):
                 cron_job_id="job-x", target_umo=UNLISTED, run_at=utc_now() + 86400
             )
             text = await AlarmTracker(s, ctx, lambda: TZ, FakeLogger()).cancel_unlisted(
-                access, admins=["10001"]
+                access
             )
             assert (
                 "管理员" not in text and "取消失败" in text and f"#{alarm_id}" in text

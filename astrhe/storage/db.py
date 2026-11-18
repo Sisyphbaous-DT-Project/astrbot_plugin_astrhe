@@ -209,6 +209,25 @@ CREATE TABLE IF NOT EXISTS memory_revisions (
 CREATE INDEX IF NOT EXISTS idx_memory_revisions_target
     ON memory_revisions(kind, target_id, ts);
 
+CREATE TABLE IF NOT EXISTS sent_receipts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    target_umo TEXT NOT NULL,
+    target_cid TEXT NOT NULL DEFAULT '',
+    origin_cid TEXT NOT NULL DEFAULT '',
+    text TEXT NOT NULL,
+    sent_at REAL NOT NULL,
+    exec_id TEXT NOT NULL DEFAULT '',
+    alarm_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'pending',
+    saved_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_sent_receipts_target
+    ON sent_receipts(target_umo, status, id);
+
+CREATE TABLE IF NOT EXISTS receipt_resets (
+    cid TEXT PRIMARY KEY, cutoff REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS kv_state (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL DEFAULT ''
@@ -244,9 +263,19 @@ class Database:
             )
         await self.ensure_column("plans", "updated_at", "REAL")
         await self.ensure_column("alarms", "finished_at", "REAL")
+        await self.ensure_column(
+            "alarms", "schedule_revision", "INTEGER NOT NULL DEFAULT 0"
+        )
         await self.ensure_column("promises", "created_at", "REAL NOT NULL DEFAULT 0")
         await self.ensure_column("promises", "updated_at", "REAL NOT NULL DEFAULT 0")
         await self.ensure_column("promises", "note", "TEXT NOT NULL DEFAULT ''")
+        await self.ensure_column(
+            "sent_receipts", "origin_cid", "TEXT NOT NULL DEFAULT ''"
+        )
+        for column in ("scope_umo", "request_id", "call_id"):
+            await self.ensure_column(
+                "sent_receipts", column, "TEXT NOT NULL DEFAULT ''"
+            )
         await conn.execute(
             "UPDATE drafts SET status='applied' WHERE applied=1 AND status='active'"
         )

@@ -7,6 +7,8 @@ import json
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from astrhe.recorder import Recorder
 from astrhe.sent_tracker import SentTracker, messages_to_text, sent_target
 from astrhe.platform import PlatformHelper
@@ -187,6 +189,16 @@ async def _cron_flow(tmp_path):
 
 
 def test_cron_sends_reach_ledger_and_history_after_summary(tmp_path):
+    try:
+        from astrbot.core.cron.events import CronMessageEvent  # noqa: F401
+        from astrbot.core.utils.history_saver import (  # noqa: F401
+            persist_agent_history,
+        )
+    except Exception:
+        pytest.skip(
+            "AstrBot 4.30 起旧任务总结与 history_saver 已删除；"
+            "4.30 的回执路径由 test_sent_receipts 覆盖"
+        )
     arun(_cron_flow(tmp_path))
 
 

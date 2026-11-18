@@ -276,6 +276,7 @@ class DraftTools:
             int(alarm_id),
             admins=self.admins,
             evidence_message_id=evidence,
+            access=self.access,
         )
         payload = {"alarm_id": int(alarm_id), "reason": reason.strip()}
         if evidence:

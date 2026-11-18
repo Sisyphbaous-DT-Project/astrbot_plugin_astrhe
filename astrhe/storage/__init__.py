@@ -11,6 +11,7 @@ from .memory import MemoryRepo
 from .persons import PersonsRepo
 from .plans import PlansRepo
 from .runs import RunsRepo
+from .sent_receipts import SentReceiptsRepo
 
 
 class Storage:
@@ -24,6 +25,7 @@ class Storage:
         self.alarms = AlarmsRepo(self.db)
         self.persons = PersonsRepo(self.db)
         self.memory = MemoryRepo(self.db)
+        self.sent_receipts = SentReceiptsRepo(self.db)
 
     async def open(self) -> None:
         await self.db.open()

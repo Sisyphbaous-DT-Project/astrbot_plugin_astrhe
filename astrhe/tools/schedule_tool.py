@@ -39,6 +39,7 @@ class ScheduleToolImpl:
         admins_getter,
         friend_request_manager=None,
         access=None,
+        create_alarm_job=None,
     ):
         self.storage = storage
         self.context = context
@@ -49,6 +50,7 @@ class ScheduleToolImpl:
         self._admins_getter = admins_getter
         self.friend_requests = friend_request_manager
         self.access = access
+        self._create_alarm_job = create_alarm_job or (lambda **kw: context.cron_manager.add_active_job(**kw))
 
     # ---------------- 入口 ----------------
 
@@ -173,7 +175,7 @@ class ScheduleToolImpl:
                 allow_repeat=is_admin,
                 # 管理员亲口要求给名单外的会话定闹钟时照办，只提醒一句
                 access=self.access,
-                allow_unlisted=is_admin,
+                allow_unlisted=is_admin and (self.access is None or sender_id in (self.access.target_admins(target_umo) or ())),
             )
         except Exception as exc:
             return f"闹钟未创建：{exc}"
@@ -197,7 +199,7 @@ class ScheduleToolImpl:
             note_text=note_text,
         )
         try:
-            job = await self.context.cron_manager.add_active_job(
+            job = await self._create_alarm_job(
                 name=f"astrhe闹钟#{alarm_id}",
                 cron_expression=cron_expression or None,
                 payload={
@@ -317,7 +319,7 @@ class ScheduleToolImpl:
         停用后不会再触发：一次性任务在这次运行结束后由 AstrBot 自行删除，
         其余停用记录随夜间对账或闹钟记录的清理一并删掉。
         """
-        if job_id == self._running_job_id(event):
+        if job_id == self._running_job_id(event) and not event.get_extra("astrhe_dispatch"):
             await self.context.cron_manager.update_job(job_id, enabled=False)
             return False
         await self.context.cron_manager.delete_job(job_id)
@@ -392,7 +394,7 @@ class ScheduleToolImpl:
             updates["run_at"] = run_at_ts
             if alarm["cron_job_id"]:
                 try:
-                    job = await self.context.cron_manager.add_active_job(
+                    job = await self._create_alarm_job(
                         name=f"astrhe闹钟#{alarm_id}",
                         cron_expression=None,
                         payload={
@@ -421,8 +423,10 @@ class ScheduleToolImpl:
                             f"新任务 {job.job_id} 也未能撤销（{rollback_exc}），请管理员检查"
                         )
                     return f"修改失败，旧闹钟已保留：{exc}"
-                await self.storage.alarms.bind_cron_job(alarm_id, job.job_id)
+                updates["job_id"] = job.job_id
                 updates["cron_expression"] = ""
+            else:
+                return "修改失败：这个闹钟没有绑定平台任务，请重新创建"
         if not run_at_str and alarm["cron_expression"]:
             try:
                 validate_alarm_time(
@@ -453,13 +457,18 @@ class ScheduleToolImpl:
         # 更新卡片与 note
         await self.storage.db.execute(
             "UPDATE alarms SET card_json=?, note_text=?, run_at=COALESCE(?, run_at),"
-            " cron_expression=COALESCE(?, cron_expression)"
+            " cron_expression=COALESCE(?, cron_expression), cron_job_id=COALESCE(?, cron_job_id),"
+            " status=CASE WHEN ? THEN 'scheduled' ELSE status END,"
+            " finished_at=CASE WHEN ? THEN NULL ELSE finished_at END,"
+            " result_note=CASE WHEN ? THEN '' ELSE result_note END"
             " WHERE id=?",
             (
                 json.dumps(card, ensure_ascii=False),
                 note_text,
                 updates.get("run_at"),
                 updates.get("cron_expression"),
+                updates.get("job_id"),
+                *(bool(updates.get("job_id")),) * 3,
                 alarm_id,
             ),
         )
@@ -521,7 +530,9 @@ class ScheduleToolImpl:
             pass
         if alarm["target_umo"] != current_umo:
             return "只能操作当前会话的闹钟"
-        admins = {str(x) for x in (self._admins_getter() or []) if str(x).isdigit()}
+        admins = self.access.target_admins(alarm['target_umo']) if self.access else {str(x) for x in (self._admins_getter() or []) if str(x).isdigit()}
+        if admins is None:
+            return '暂时无法确认目标会话的管理员，未修改闹钟'
         if str(alarm["creator_id"]) in admins:
             return "这是管理员亲自安排的闹钟，只有管理员能修改或取消"
         return ""

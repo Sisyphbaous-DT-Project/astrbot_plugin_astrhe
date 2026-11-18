@@ -92,9 +92,15 @@ class Recorder:
             return False
 
     async def record_event(self, event: Any) -> None:
-        """处理一条到达的事件（消息 / notice / request）。"""
+        """处理一条到达的事件（消息 / notice / request）。
+
+        程序化唤醒（event_kind=="agent_wakeup"，4.30 起定时任务走这条路）
+        不是任何人说的话，完整卡片更不能进账本，一律不记。
+        """
         try:
             if not self._enabled():
+                return
+            if getattr(event, "event_kind", "") == "agent_wakeup":
                 return
             if event.get_platform_name() != "aiocqhttp":
                 return
@@ -180,7 +186,7 @@ class Recorder:
         message_type = obj.type.value if hasattr(obj.type, "value") else str(obj.type)
         session_id = normalize_session_id(message_type, str(obj.session_id))
         umo = build_umo(event.get_platform_id(), message_type, session_id)
-        if not self._allowed(umo):
+        if not self._allowed(getattr(event, "unified_msg_origin", "") or umo):
             return
         text = components_to_text(obj.message)
         sender = obj.sender

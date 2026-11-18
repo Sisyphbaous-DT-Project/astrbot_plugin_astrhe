@@ -1,10 +1,16 @@
 """闹钟跟踪与对账。
 
 - 生命周期与发送结果分离：fired/done 状态，send_ok/send_failed 事件。
-- 手动提前执行记 manual_run 事件；一次性闹钟开始执行即停用平台任务，避免面板立即执行后到点再跑一次。
+- 手动提前执行记 manual_run 事件；面板立即执行的一次性任务在派发点停用
+  （4.30 由 wakeup_compat 做，旧版在这里停用），避免到点再跑一次。
 - 完整回流窗口内的执行、发送失败、缺失和中断；触发一小时内不判中断。
-- 停机错过的一次性闹钟、平台任务已消失的重复闹钟，判为失踪并删掉残留任务。
-- 唤醒时同时核对闹钟编号与平台任务编号；插件数据重置后遗留的旧任务不认，对账时删掉。
+- 4.30 派发先记 dispatched 事件，turn 最终结果（completed/error/cancelled/
+  max_steps/skipped）由 wakeup_compat 的观察者经 settle_turn 结算；
+  改期后旧执行的结算不覆盖新安排。
+- 停机错过的一次性闹钟、平台任务已消失的重复闹钟，判为失踪并删掉残留任务；
+  已派发却未见执行（进程重启丢失）与停机错过在对账里区分说明。
+- 唤醒时同时核对闹钟编号与平台任务编号；插件数据重置后遗留的旧任务不认，
+  对账时删掉；4.30 无旧 extras 的宿主派发按 source_id（任务编号）查绑定。
 """
 
 from __future__ import annotations
@@ -21,6 +27,23 @@ MANUAL_RUN_TOLERANCE = 300
 
 _SEND_OK_PREFIX = "Message sent to session"
 
+#: 生命周期事件：见到这些说明派发确实进入了执行
+_EXECUTION_EVENT_KINDS = ("fired", "manual_run", "done", "interrupted")
+
+
+def _dispatched_without_execution(events: list[dict]) -> bool:
+    """最后一次派发（4.30 的 dispatched）之后没有任何执行事件。
+
+    用于把「已派发但进程重启丢失执行」和「停机根本没派发」区分开。
+    """
+    saw_dispatch = False
+    for event in events:
+        if event["kind"] == "dispatched":
+            saw_dispatch = True
+        elif event["kind"] in _EXECUTION_EVENT_KINDS:
+            saw_dispatch = False
+    return saw_dispatch
+
 
 class AlarmTracker:
     def __init__(self, storage: Any, context: Any, tz_getter, logger: Any):
@@ -28,6 +51,7 @@ class AlarmTracker:
         self.context = context
         self._tz_getter = tz_getter
         self.logger = logger
+        self.dispatch_active = lambda job_id: False
 
     # ---------------- 钩子入口（由 main.py 转发） ----------------
 
@@ -36,20 +60,28 @@ class AlarmTracker:
 
         插件数据被删除重建后，旧平台任务里的闹钟编号会撞上新闹钟，
         所以还要核对平台任务编号，对不上就不认，免得把新闹钟误标执行、误停任务。
+
+        AstrBot 4.30 的唤醒事件没有旧 cron_job/cron_payload extras（AstrHe 自己
+        派发时会补上）；适配未安装或已卸载时按 source=="cron" + source_id（平台
+        任务编号）查本地闹钟，对不上任何闹钟的外部任务不认。
         """
         payload = event.get_extra("cron_payload")
-        if not isinstance(payload, dict) or not payload.get("astrhe_alarm_id"):
-            return None
-        alarm = await self.storage.alarms.get_by_alarm_id_str(
-            str(payload["astrhe_alarm_id"])
-        )
-        if alarm is None:
-            return None
-        cron_job = event.get_extra("cron_job")
-        job_id = str(cron_job.get("id") or "") if isinstance(cron_job, dict) else ""
-        if job_id and job_id != alarm["cron_job_id"]:
-            return None
-        return alarm
+        if isinstance(payload, dict) and payload.get("astrhe_alarm_id"):
+            alarm = await self.storage.alarms.get_by_alarm_id_str(
+                str(payload["astrhe_alarm_id"])
+            )
+            if alarm is None:
+                return None
+            cron_job = event.get_extra("cron_job")
+            job_id = str(cron_job.get("id") or "") if isinstance(cron_job, dict) else ""
+            if job_id and job_id != alarm["cron_job_id"]:
+                return None
+            return alarm
+        if str(getattr(event, "source", "") or "") == "cron":
+            source_id = str(getattr(event, "source_id", "") or "")
+            if source_id:
+                return await self.storage.alarms.get_by_job(source_id)
+        return None
 
     async def on_agent_begin(self, event: Any) -> None:
         """闹钟唤醒开始。"""
@@ -69,13 +101,28 @@ class AlarmTracker:
                 manual = started_ts < float(run_at) - MANUAL_RUN_TOLERANCE
             except (ValueError, TypeError):
                 pass
+        # 4.30 自有派发的执行编号：结算幂等靠它区分「同一次执行」与「下一次触发」
+        dispatch = event.get_extra("astrhe_dispatch")
+        exec_no = str(dispatch.get("exec_no", "")) if isinstance(dispatch, dict) else ""
+        if exec_no:
+            await self.storage.alarms.record_execution(
+                alarm["id"],
+                dispatch["job_id"],
+                exec_no,
+                "manual_run" if manual else "fired",
+                "fired",
+            )
+            return
         await self.storage.alarms.add_event(
-            alarm["id"], "manual_run" if manual else "fired"
+            alarm["id"], "manual_run" if manual else "fired", ""
         )
         await self.storage.alarms.set_status(alarm["id"], "fired")
         # 一次性闹钟一开始执行就停用平台任务：到点执行的 AstrBot 跑完会自行删除；
-        # 面板「立即执行」不删除任务，停用后原定时间不会再跑一次（含临近原定时间的点击）
-        await self._disable_run_once(alarm)
+        # 面板「立即执行」不删除任务，停用后原定时间不会再跑一次（含临近原定时间的点击）。
+        # 4.30 的 AstrHe 派发在派发点已经停用过（astrhe_dispatch 标记），
+        # 而且一次性平台行在入队后就被删除，这里不必再动。
+        if event.get_extra("astrhe_dispatch") is None:
+            await self._disable_run_once(alarm)
 
     async def on_llm_tool_respond(
         self, event: Any, tool: Any, tool_args: Any, tool_result: Any
@@ -103,19 +150,64 @@ class AlarmTracker:
                 text + "；参数：" + json.dumps(tool_args, ensure_ascii=False),
             )
 
-    async def on_agent_done(self, event: Any) -> None:
-        """正常结束 → done。"""
+    async def on_agent_done(self, event: Any, run_context: Any = None) -> None:
+        """正常结束 → done。
+
+        4.30 的 on_agent_done 在 completed/error/cancelled/max_steps 都会调用，
+        结束原因在 run_context.run_end_reason，只有真正 completed 才算完成；
+        AstrHe 自己派发（astrhe_dispatch）的 turn 由 wakeup_compat 的观察者按
+        turn.result() 结算，这里不重复处理。
+        """
+        if event.get_extra("astrhe_dispatch") is not None:
+            return
         alarm = await self._alarm_for_event(event)
         if alarm is None:
             return
-        if alarm["status"] == "fired":
-            await self.storage.alarms.add_event(alarm["id"], "done")
-            await self.storage.alarms.set_status(alarm["id"], "done")
+        if alarm["status"] != "fired":
+            return
+        reason = str(getattr(run_context, "run_end_reason", "") or "completed")
+        if reason != "completed":
+            note = f"执行中断（{reason}）"
+            await self.storage.alarms.add_event(alarm["id"], "interrupted", note)
+            if not alarm["cron_expression"]:
+                await self.storage.alarms.set_status(alarm["id"], "failed", note)
+            return
+        await self.storage.alarms.add_event(alarm["id"], "done")
+        await self.storage.alarms.set_status(alarm["id"], "done")
+
+    async def settle_turn(
+        self,
+        alarm_id: int,
+        job_id: str,
+        exec_no: str,
+        status: str,
+        reason: str,
+        message: str = "",
+    ) -> None:
+        """4.30 派发的 turn 最终结果结算（由 wakeup_compat 的观察者调用）。
+
+        更新闹钟状态前核对当前绑定：改期/重建后旧执行的结算不再覆盖新安排。
+        completed + reason=skipped（排队跳过、准入未通过）不算成功。
+        幂等按执行编号（exec_no）判断：同一次执行的重复结算跳过，
+        重复闹钟的下一次触发不受上一次结算影响。
+        重复闹钟本次中断不等于取消未来：只记事件与状态，平台任务仍按规则触发。
+        """
+        if status == "completed" and reason == "completed":
+            await self.storage.alarms.record_execution(
+                alarm_id, job_id, exec_no, "done", "done", reason
+            )
+            return
+        note = f"本次执行中断（{reason or status}）" + (
+            f"：{message}" if message else ""
+        )
+        await self.storage.alarms.record_execution(
+            alarm_id, job_id, exec_no, "interrupted", "failed", note
+        )
 
     async def finalize_stale_started(self) -> None:
         """触发超过一小时仍未正常结束才判中断。"""
         for alarm in await self.storage.alarms.active_alarms():
-            if alarm["status"] != "fired":
+            if alarm["status"] != "fired" or self.dispatch_active(alarm["cron_job_id"]):
                 continue
             events = await self.storage.alarms.events(alarm["id"])
             fired = [e for e in events if e["kind"] in ("fired", "manual_run")]
@@ -156,18 +248,24 @@ class AlarmTracker:
         now = utc_now()
         lost: set[int] = set()
         for alarm in await self.storage.alarms.live_alarms():
+            if self.dispatch_active(alarm["cron_job_id"]):
+                continue
             note = ""
             if not alarm["cron_expression"]:
                 if (
                     alarm["status"] == "scheduled"
                     and alarm["run_at"] is not None
                     and alarm["run_at"] < now - C.ALARM_LOST_GRACE_SECONDS
-                    and not any(
-                        e["kind"] in ("fired", "manual_run")
-                        for e in await self.storage.alarms.events(alarm["id"])
-                    )
                 ):
-                    note = "错过：原定时间已过仍没有执行（可能因停机），不会再触发"
+                    events = await self.storage.alarms.events(alarm["id"])
+                    if any(e["kind"] in ("fired", "manual_run") for e in events):
+                        continue
+                    if _dispatched_without_execution(events):
+                        # 4.30 派发入队后平台行即被删除；派发过却没见执行，
+                        # 是进程重启把执行丢了，不是停机错过
+                        note = "已派发但未见执行（进程重启丢失），平台任务已删"
+                    else:
+                        note = "错过：原定时间已过仍没有执行（可能因停机），不会再触发"
             elif jobs_ok and alarm["cron_job_id"] not in jobs:
                 note = "重复任务在平台上已不存在（可能被面板删除），不会再触发"
             if not note:
@@ -211,22 +309,24 @@ class AlarmTracker:
             )
         return dropped
 
-    async def cancel_unlisted(
-        self, access: Any, *, admins=(), dry: bool = False
-    ) -> str:
+    async def cancel_unlisted(self, access: Any, *, dry: bool = False) -> str:
         """目标已不在会话名单里的生效闹钟：管理员白天亲口定的保留，其余取消。
 
         正在执行的跳过，下一晚再看；演练只报告不取消。
         """
-        admin_ids = {str(a) for a in admins}
         cancelled, kept, failed = [], [], []
         for alarm in await self.storage.alarms.live_alarms():
             if alarm["status"] == "fired" or await access.allows(alarm["target_umo"]):
                 continue
             label = f"#{alarm['id']} → {alarm['target_umo']}"
-            if alarm["origin"] == "day" and str(alarm["creator_id"]) in admin_ids:
-                kept.append(label)
-                continue
+            if alarm["origin"] == "day":
+                admin_ids = access.target_admins(alarm["target_umo"])
+                if admin_ids is None:
+                    failed.append(f"{label}（无法确认目标会话管理员）")
+                    continue
+                if str(alarm["creator_id"]) in admin_ids:
+                    kept.append(label)
+                    continue
             if dry:
                 cancelled.append(f"{label}（演练，未实际取消）")
                 continue
@@ -280,13 +380,21 @@ class AlarmTracker:
             all_events = await self.storage.alarms.events(alarm["id"])
             fired = any(e["kind"] in ("fired", "manual_run") for e in all_events)
             status = alarm["status"]
-            if due and status == "scheduled" and not fired and jobs_ok:
+            if (
+                due
+                and status == "scheduled"
+                and not fired
+                and jobs_ok
+                and not self.dispatch_active(alarm["cron_job_id"])
+            ):
                 job = cron_jobs.get(alarm["cron_job_id"])
                 if job is None or not job.enabled:
+                    if _dispatched_without_execution(all_events):
+                        reason = "已派发但未见执行（进程重启丢失）"
+                    else:
+                        reason = "到点没执行，任务缺失或停用"
                     status = "missing"
-                    await self.storage.alarms.set_status(
-                        alarm["id"], status, "到点没执行，任务缺失或停用"
-                    )
+                    await self.storage.alarms.set_status(alarm["id"], status, reason)
             details = []
             if any(e["kind"] == "manual_run" for e in events):
                 details.append("面板立即执行过")

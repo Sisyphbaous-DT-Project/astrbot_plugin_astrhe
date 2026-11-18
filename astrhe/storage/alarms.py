@@ -68,6 +68,101 @@ class AlarmsRepo:
             "UPDATE alarms SET cron_job_id=? WHERE id=?", (cron_job_id, alarm_id)
         )
 
+    async def claim_dispatch(self, info: dict) -> bool:
+        """一次性任务以平台绑定认领，重复任务的每次触发单独入账。"""
+        revision = info.get("revision", 0)
+        detail = json.dumps(
+            {
+                "exec": info["exec_no"],
+                "job": info["job_id"],
+                "at": info["dispatched_at"],
+                "revision": revision,
+            }
+        )
+        cur = await self.db.execute(
+            "INSERT INTO alarm_events(alarm_id,ts,kind,detail) SELECT id,?,'dispatched',?"
+            " FROM alarms WHERE id=? AND cron_job_id=? AND schedule_revision=? AND status NOT IN ('cancelled','missing')"
+            " AND (NOT ? OR (status='scheduled' AND NOT EXISTS (SELECT 1 FROM alarm_events"
+            " WHERE alarm_id=alarms.id AND kind='dispatched' AND json_valid(detail)"
+            " AND json_extract(detail,'$.job')=? AND COALESCE(json_extract(detail,'$.revision'),0)=alarms.schedule_revision)))",
+            (
+                info["dispatched_at"],
+                detail,
+                info["alarm_id"],
+                info["job_id"],
+                revision,
+                info["run_once"],
+                info["job_id"],
+            ),
+        )
+        return cur.rowcount == 1
+
+    async def move_platform_schedule(self, alarm_id, job_id, at, expression):
+        await self.db.execute(
+            "UPDATE alarms SET run_at=?, cron_expression=?, schedule_revision=schedule_revision+1,"
+            " status='scheduled', result_note='', finished_at=NULL WHERE id=? AND cron_job_id=?"
+            " AND status NOT IN ('cancelled','missing')",
+            (at, expression, alarm_id, job_id),
+        )
+
+    async def cancel_platform_schedule(self, alarm_id, job_id):
+        await self.db.execute(
+            "UPDATE alarms SET status='cancelled', finished_at=?, result_note='平台任务已删除'"
+            " WHERE id=? AND cron_job_id=? AND status NOT IN ('cancelled','missing')"
+            " AND (cron_expression!='' OR status IN ('scheduled','fired'))",
+            (utc_now(), alarm_id, job_id),
+        )
+
+    async def record_execution(
+        self,
+        alarm_id: int,
+        job: str,
+        execution: str,
+        kind: str,
+        status: str,
+        note: str = "",
+    ) -> None:
+        """流水与状态一次提交。迟到结果可留流水，不能复活取消的安排或覆盖下一轮。"""
+        terminal = kind in ("done", "interrupted")
+        detail = json.dumps({"exec": execution, "note": note}, ensure_ascii=False)
+        async with self.db.write_lock:
+            conn = self.db.conn
+            try:
+                cur = await conn.execute(
+                    "INSERT INTO alarm_events(alarm_id,ts,kind,detail) SELECT id,?,?,? FROM alarms"
+                    " WHERE id=? AND cron_job_id=? AND NOT EXISTS (SELECT 1 FROM alarm_events"
+                    " WHERE alarm_id=? AND (kind IN ('done','interrupted') OR kind=?)"
+                    " AND json_valid(detail) AND json_extract(detail,'$.exec')=?)",
+                    (utc_now(), kind, detail, alarm_id, job, alarm_id, kind, execution),
+                )
+                if cur.rowcount:
+                    await conn.execute(
+                        "UPDATE alarms SET status=?,result_note=?,finished_at=CASE WHEN ? AND cron_expression=''"
+                        " THEN ? ELSE NULL END WHERE id=? AND cron_job_id=? AND status NOT IN ('cancelled','missing')"
+                        " AND schedule_revision=COALESCE((SELECT json_extract(detail,'$.revision') FROM alarm_events"
+                        " WHERE alarm_id=alarms.id AND kind='dispatched' AND json_valid(detail) AND json_extract(detail,'$.exec')=?),0)"
+                        " AND COALESCE((SELECT json_extract(detail,'$.exec') FROM alarm_events WHERE alarm_id=?"
+                        " AND kind='dispatched' AND json_valid(detail) AND json_extract(detail,'$.job')=?"
+                        " ORDER BY id DESC LIMIT 1),?)=?",
+                        (
+                            status,
+                            note if status == "failed" else "",
+                            terminal,
+                            utc_now(),
+                            alarm_id,
+                            job,
+                            execution,
+                            alarm_id,
+                            job,
+                            execution,
+                            execution,
+                        ),
+                    )
+                await conn.commit()
+            except BaseException:
+                await conn.rollback()
+                raise
+
     async def set_status(
         self, alarm_id: int, status: str, result_note: str | None = None
     ) -> None:
@@ -106,10 +201,13 @@ class AlarmsRepo:
         return await self.get_alarm(alarm_id)
 
     async def active_alarms(self) -> list[dict[str, Any]]:
-        """仍在等待执行或执行中的闹钟（对账与注入用）。"""
+        """仍在等待执行、执行中或还会再次触发的闹钟（对账、注入与保密提醒用）。
+
+        与 live_alarms 同一套生效口径：重复闹钟上一次执行失败也算生效
+        （平台任务仍会按规则继续触发），后续保密提醒不丢。
+        """
         return await self.db.fetchall(
-            "SELECT * FROM alarms WHERE status IN"
-            " ('scheduled','fired') OR (cron_expression!='' AND status='done') ORDER BY id ASC"
+            f"SELECT * FROM alarms WHERE {LIVE_ALARM_SQL} ORDER BY id"
         )
 
     async def list_alarms(self, limit: int = 200) -> list[dict[str, Any]]:

@@ -25,7 +25,7 @@
     "items": {
       "type": "string"
     },
-    "hint": "AstrHe 只记录、复盘这些会话，也只给这些会话定闹钟（管理员亲口要求定闹钟的除外）。留空：沿用 AstrBot 的白名单（在 AstrBot「配置文件 → 访问控制 → 白名单」里开启并填写了名单才算设置好；AstrBot 也没设置时不限制）。填写：以这里为准，不再看 AstrBot 的白名单。逐项填写：用 /sid 获取的会话 ID（如 default:GroupMessage:123456、default:FriendMessage:123456），或直接写群号。管理员的私聊始终会被复盘，除非写进黑名单。",
+    "hint": "留空沿用 AstrBot 白名单；填写只在宿主允许的范围内进一步收窄。逐项填写 /sid 的完整会话 ID 或纯群号；私聊使用完整 ID。管理员私聊是否豁免宿主规则取决于目标会话的配置，不能越过宿主停用。",
     "default": []
   },
   "session_blacklist": {
@@ -34,13 +34,13 @@
     "items": {
       "type": "string"
     },
-    "hint": "AstrBot 没有黑名单，这是 AstrHe 自己的。写进来的会话一律不碰：不记录、不复盘、不定闹钟（管理员亲口要求定闹钟的除外），优先级高于白名单。适合 bot 在群里照常聊天、但不想拿这个群来复盘的情况。写法同白名单。",
+    "hint": "这是 AstrHe 自己的黑名单，优先于插件白名单。可让 bot 在群里照常聊天，但不记录或复盘该群。管理员明确安排闹钟可豁免插件名单，不能越过宿主限制。写法同白名单。",
     "default": []
   },
   "frontend_landscape": {
     "type": "string",
     "description": "横屏打开时使用的前端",
-    "hint": "只按打开档案终端页面那一刻的横竖屏选择，之后转屏或拖动窗口不会切换。SOUL OS 是三维档案馆，每次打开约下载 27 MB；NORMAL 是 Material Design 3 普通版，用系统字体，不下载三维模型和字体，适合低配电脑和手机。",
+    "hint": "只按打开档案终端页面那一刻的横竖屏选择，之后转屏或拖动窗口不会切换。SOUL OS 是三维档案馆，每次打开约下载 16 MB；NORMAL 是 Material Design 3 普通版，用系统字体，不下载三维模型和字体，适合低配电脑和手机。",
     "options": ["SOUL OS", "NORMAL"],
     "default": "SOUL OS"
   },

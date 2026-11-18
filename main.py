@@ -73,7 +73,7 @@ class AstrHe(Star):
 
     @filter.on_agent_done()
     async def track_agent_done(self, event: AstrMessageEvent, run_context, response) -> None:
-        await self.runtime.alarm_tracker.on_agent_done(event)
+        await self.runtime.alarm_tracker.on_agent_done(event, run_context)
         await self.runtime.sent_tracker.on_agent_done(event)
 
     # ---------------- 指令（仅管理员） ----------------

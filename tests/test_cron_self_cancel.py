@@ -179,6 +179,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 )
 @pytest.mark.parametrize("mode", ["edit", "cancel"])
 def test_real_cron_run_can_modify_its_own_alarm(tmp_path, mode):
+    try:
+        from astrbot.core.cron.events import CronMessageEvent  # noqa: F401
+    except Exception:
+        pytest.skip(
+            "AstrBot 4.30 起旧 CronMessageEvent 已删除（调度与 agent 解耦，"
+            "不再有自删死锁）；4.30 的派发与准入由 test_wakeup_compat 覆盖"
+        )
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join([str(PROJECT_ROOT), str(ASTRBOT_SOURCE)])
     env["PYTHONDONTWRITEBYTECODE"] = "1"

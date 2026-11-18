@@ -116,6 +116,11 @@ async def cleanup_before_night(storage, context, keep_run_id, window_start, logg
     except Exception as exc:
         logger.warning(f"[AstrHe] 聊天账本清理失败：{exc}")
     try:
+        # 已补进宿主历史的发送回执按保留期清理；未补的绝不按时间删除
+        await storage.sent_receipts.cleanup_saved_before(min(cutoff, window_start))
+    except Exception as exc:
+        logger.warning(f"[AstrHe] 发送回执清理失败：{exc}")
+    try:
         await cleanup_history(
             storage,
             cutoff,

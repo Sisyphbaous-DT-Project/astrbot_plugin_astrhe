@@ -39,6 +39,7 @@ class DraftCommitter:
         qq_client: Any = None,
         admins=None,
         access: Any = None,
+        create_alarm_job=None,
     ):
         self.storage = storage
         self.context = context
@@ -48,6 +49,9 @@ class DraftCommitter:
         self.rate_limiter = rate_limiter
         self.qq = qq_client
         self.access = access
+        self._create_alarm_job = create_alarm_job or (
+            lambda **kw: context.cron_manager.add_active_job(**kw)
+        )
         self.admins = (
             admins if admins is not None else context.get_config().get("admins_id", [])
         )
@@ -310,6 +314,7 @@ class DraftCommitter:
                 self.storage,
                 alarm_id,
                 admins=self.admins,
+                access=self.access,
                 evidence_message_id=payload.get("evidence_message_id", ""),
             )
             await self.context.cron_manager.delete_job(alarm["cron_job_id"])
@@ -358,7 +363,7 @@ class DraftCommitter:
             created_run_id=self.run_id,
         )
         try:
-            job = await self.context.cron_manager.add_active_job(
+            job = await self._create_alarm_job(
                 name=f"astrhe闹钟#{alarm_id}",
                 cron_expression=cron_expression or None,
                 payload={
